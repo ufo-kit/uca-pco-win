@@ -1,0 +1,1 @@
+UCA plugin for pco scientific cameras. Built for windows.
