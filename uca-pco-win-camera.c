@@ -1042,7 +1042,7 @@ uca_pcowin_camera_init(UcaPcowinCamera *self)
     priv->construct_error = NULL;
     
     error = setupsdk_and_opencamera (priv,self);
-    if(!error)
+    if(error)
     {
         PCO_GetErrorText(error, error_text, ERROR_TEXT_BUFFER_SIZE);
         g_set_error (&priv->construct_error,
