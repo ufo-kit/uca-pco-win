@@ -1,7 +1,7 @@
 /**
 Notes:
     PCO SDK uses windows specific data types in its header files and documentation.
-    This program has glib data types. For ex. to a pco library function that requires WORD, 
+    This program has glib data types. For ex. for a pco library function that requires WORD, 
     relevant guint16 variable is initialized and given.
 
     minwindef.h typedef's windows specific datatypes to generic datatypes
@@ -22,8 +22,20 @@ Notes:
 #define TRIGGER_MODE_AUTOTRIGGER        0x0000
 #define TRIGGER_MODE_SOFTWARETRIGGER    0x0001
 #define TRIGGER_MODE_EXTERNALTRIGGER    0x0002
+#define SENSORFORMAT_STANDARD           0x0000
+#define SENSORFORMAT_EXTENDED           0x0001
+#define ERROR_TEXT_BUFFER_SIZE          500
 
 #define UCA_PCOWIN_CAMERA_GET_PRIVATE(obj) (G_TYPE_INSTANCE_GET_PRIVATE((obj), UCA_TYPE_PCOWIN_CAMERA, UcaPcowinCameraPrivate))
+
+#define CHECK_FOR_PCO_SDK_ERROR(err)                                                                \
+    if (err != 0) {                                                                                 \
+        PCO_GetErrorText(err, error_text, ERROR_TEXT_BUFFER_SIZE);                                  \
+        g_set_error (error, UCA_PCOWIN_CAMERA_ERROR,                                                \
+                     UCA_PCOWIN_CAMERA_ERROR_SDKERROR,                                              \
+                     "Error occured in PCO SDK. Here's error code 0x%X for enquiring minds.\nSDK Error Text: %s",err,error_text);   \
+        return;                                                                                     \
+    }
 
 static void uca_pcowin_initable_iface_init (GInitableIface *iface);
 
@@ -96,12 +108,13 @@ GQuark uca_pcowin_camera_error_quark()
     return g_quark_from_static_string("uca-pcowin-camera-error-quark");
 }
 
+static char error_text[ERROR_TEXT_BUFFER_SIZE];
+
 struct _UcaPcowinCameraPrivate {
     
     HANDLE pcoHandle;
     
     GError *construct_error;
-    guint current_frame;
     
     PCO_General strGeneral;
     PCO_CameraType strCamType;
@@ -113,7 +126,19 @@ struct _UcaPcowinCameraPrivate {
 
     guint16 roi_x, roi_y;
     guint16 roi_width, roi_height;
-    
+    guint16 roi_horizontal_steps, roi_vertical_steps;
+    guint16 width, height, width_ex, height_ex;
+    guint16 horizontal_binning, vertical_binning;
+    GValueArray *possible_pixelrates;
+
+    // With buff number = -1 and bufferPointer set to 0. SDK allocated a buffer for us
+    gint16 buffer_number; 
+    guint16 buffer_pointer;
+    guint32 buffer_size;
+    guint16 active_ram_segment;
+    guint16 numberof_recorded_images;
+
+    UcaCameraTriggerSource trigger_source;
 };
 
 map_timebase(short timebase)
@@ -138,13 +163,111 @@ pcowin_grab_func(gpointer data)
 static void
 uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
 {
+    UcaPcowinCameraPrivate *priv;
+
+    guint16 binned_width, binned_height;
+    gboolean use_extended_sensor_format;
+    gboolean transfer_async;
+    guint err;
+    int library_errors;
+
+    g_return_if_fail (UCA_IS_PCOWIN_CAMERA (camera));
+
+    priv = UCA_PCOWIN_CAMERA_GET_PRIVATE (camera);
+
+    g_object_get (camera,
+                  "trigger-source", &priv->trigger_source,
+                  "sensor-extended", &use_extended_sensor_format,
+                  "transfer-asynchronously", &transfer_async,
+                  NULL);
+
+    if(use_extended_sensor_format)
+    {
+        binned_width = priv->width_ex;
+        binned_height = priv->height_ex;
+    }
+    else
+    {
+        binned_width = priv->width;
+        binned_height = priv->height;
+    }
+
+    // For priliminary tests
+    priv->horizontal_binning = priv->vertical_binning = 1;
+
+    // The following peice of code make sures that the ROI defined is not beyond the limits of available area binning
+    binned_width /= priv->horizontal_binning;
+    binned_height /= priv->vertical_binning;
+
+    if ((priv->roi_x + priv->roi_width > binned_width) || (priv->roi_y + priv->roi_height > binned_height)) {
+        g_set_error (error, UCA_PCOWIN_CAMERA_ERROR, UCA_PCOWIN_CAMERA_ERROR_UNSUPPORTED,
+                     "ROI of size %ix%i @ (%i, %i) is outside of (binned) sensor size %ix%i\n",
+                     priv->roi_width, priv->roi_height, priv->roi_x, priv->roi_y, binned_width, binned_height);
+        return;
+    }
+
+    library_errors = PCO_SetBinning(priv->pcoHandle, priv->horizontal_binning, priv->vertical_binning);
+    CHECK_FOR_PCO_SDK_ERROR(library_errors);
+    
+    guint16 roi[4] = { priv->roi_x + 1, priv->roi_y + 1, priv->roi_x + priv->roi_width, priv->roi_y + priv->roi_height };
+    library_errors = PCO_SetROI(priv->pcoHandle, &roi[0], &roi[1], &roi[2], &roi[3]);
+    CHECK_FOR_PCO_SDK_ERROR(library_errors);
+
+    // Trigger mode is auto in camera default settings
+
+    // Recorder sub mode is not in uca-pco. Ask
+    library_errors = PCO_SetRecorderSubmode(priv->pcoHandle, 1);
+    CHECK_FOR_PCO_SDK_ERROR(library_errors);
+
+    library_errors = PCO_ArmCamera(priv->pcoHandle);
+    CHECK_FOR_PCO_SDK_ERROR(library_errors);
+
+    // Diagnostics
+    guint32 status, warnus, errnus;
+    library_errors = PCO_GetCameraHealthStatus(priv->pcoHandle, &warnus, &errnus, &status);
+    //g_printf("0x%X \t 0x%X \t 0x%X \t",warnus,errnus,status);
+
+    // Get actual armed (also locked and loaded, ready to fire the hell out) image sizes from camera. This data is used to allocate buffer
+    guint16 x_act, y_act, x_max, y_max;
+    library_errors = PCO_GetSizes(priv->pcoHandle, &x_act, &y_act, &x_max, &y_max);
+    CHECK_FOR_PCO_SDK_ERROR(library_errors);
+    // @ToDo. Implement checks to verify if the sizes received from camera are same as ROI
+
+    // Allocation of buffer. Driver allocates a number if buffer number is set to -1
+    priv->buffer_number = -1; 
+    priv->buffer_pointer = NULL;
+    priv->buffer_size = x_act * y_act * 2;
+
+    library_errors = PCO_AllocateBuffer(priv->pcoHandle, &priv->buffer_number, priv->buffer_size, &priv->buffer_pointer, NULL);
+    CHECK_FOR_PCO_SDK_ERROR(library_errors);
+
+    library_errors = PCO_CamLinkSetImageParameters(priv->pcoHandle, x_act, y_act);
+    CHECK_FOR_PCO_SDK_ERROR(library_errors);
+
+    library_errors = PCO_SetRecordingState(priv->pcoHandle, 0x0001);
+    CHECK_FOR_PCO_SDK_ERROR(library_errors);
+
 
 }
 
 static void
 uca_pcowin_camera_stop_recording(UcaCamera *camera, GError **error)
 {
+    UcaPcowinCameraPrivate *priv;
+    int library_errors;
 
+    g_return_if_fail(UCA_IS_PCOWIN_CAMERA(camera));
+
+    priv = UCA_PCOWIN_CAMERA_GET_PRIVATE (camera);
+
+    library_errors = PCO_CancelImages(priv->pcoHandle);
+    CHECK_FOR_PCO_SDK_ERROR(library_errors);
+
+    library_errors = PCO_SetRecordingState(priv->pcoHandle, 0x0000);
+    CHECK_FOR_PCO_SDK_ERROR(library_errors);
+
+    /*guint32 status, warnus, errnus;
+    library_errors = PCO_GetCameraHealthStatus(priv->pcoHandle, &warnus, &errnus, &status);*/
 }
 
 static void
@@ -160,6 +283,28 @@ uca_pcowin_camera_stop_readout(UcaCamera *camera, GError **error)
 static void
 uca_pcowin_camera_trigger (UcaCamera *camera, GError **error)
 {
+    int library_errors;
+    UcaPcowinCameraPrivate *priv;
+    guint16 trigger_state;
+    guint16 is_camera_busy;
+
+    g_return_if_fail(UCA_IS_PCOWIN_CAMERA(camera));
+
+    priv=UCA_PCOWIN_CAMERA_GET_PRIVATE(camera);
+
+    /*If a trigger fails it will not trigger future exposures. 
+    Therefore calling forcetrigger is prevented if camera is busy*/
+    library_errors = PCO_GetCameraBusyStatus(priv->pcoHandle, &is_camera_busy);
+    CHECK_FOR_PCO_SDK_ERROR(library_errors);
+    if(is_camera_busy)
+    {
+        g_set_error(error, UCA_PCOWIN_CAMERA_ERROR, UCA_PCOWIN_CAMERA_ERROR_GENERAL, "Software trigger was prevented because camera is busy");
+    }
+    else
+    {
+        library_errors = PCO_ForceTrigger(priv->pcoHandle, &trigger_state);
+        CHECK_FOR_PCO_SDK_ERROR(library_errors);
+    }
 }
 
 static gboolean
@@ -171,20 +316,187 @@ uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
 static gboolean
 uca_pcowin_camera_readout (UcaCamera *camera, gpointer data, guint index, GError **error)
 {
-    
+
 }
 
 static void
 uca_pcowin_camera_set_property (GObject *object, guint property_id, const GValue *value, GParamSpec *pspec)
 {
+    UcaPcowinCameraPrivate *priv = UCA_PCOWIN_CAMERA_GET_PRIVATE (object);
+    int library_errors;
 
+    if (uca_camera_is_recording (UCA_CAMERA (object)) && !uca_camera_is_writable_during_acquisition (UCA_CAMERA (object), pspec->name)) {
+        g_warning ("Property '%s' can not be changed during acquisition", pspec->name);
+        return;
+    }
+
+    switch(property_id) {
+        case PROP_SENSOR_EXTENDED:
+            {
+                guint16 format = g_value_get_boolean (value) ? SENSORFORMAT_EXTENDED : SENSORFORMAT_STANDARD;
+                library_errors = PCO_SetSensorFormat(priv->pcoHandle, format);
+            }
+            break;
+        case PROP_ROI_X:
+            priv->roi_x = g_value_get_uint(value);
+            break;
+        case PROP_ROI_Y:
+            priv->roi_y = g_value_get_uint(value);
+            break;
+        case PROP_ROI_WIDTH:
+            priv->roi_width = g_value_get_uint(value);
+            break;
+        case PROP_ROI_HEIGHT:
+            priv->roi_height = g_value_get_uint(value);
+            break;
+        case PROP_SENSOR_HORIZONTAL_BINNING:
+            {
+                if(g_value_get_uint(value) <= priv->strDescription.wMaxBinHorzDESC)
+                    priv->horizontal_binning = g_value_get_uint(value);    
+                else
+                    g_warning("Horizontal binning value exceeds maximum horizontal binning of camera");
+            }
+            break;
+        case PROP_SENSOR_VERTICAL_BINNING:
+            {
+                if(g_value_get_uint(value) <= priv->strDescription.wMaxBinVertDESC)
+                    priv->vertical_binning = g_value_get_uint(value);
+                else
+                    g_warning("Vertical binning value exceeds maximum vertical binning of camera");
+            }
+            break;
+        case PROP_EXPOSURE_TIME:
+            {
+                guint32 delay, exposure;
+                short delay_time_base, exposure_time_base;
+                library_errors = PCO_GetDelayExposureTime(priv->pcoHandle, &delay, &exposure, &delay_time_base, &exposure_time_base);
+                exposure = (guint32) g_value_get_double(value) / exposure_time_base;
+                library_errors = PCO_SetDelayExposureTime(priv->pcoHandle, delay, exposure, delay_time_base, exposure_time_base);
+            }
+            break;
+        case PROP_FRAMES_PER_SECOND:
+            {
+                // Works in dimax and edge only. @ToDo Write implementation for other cameras
+                guint16 framerate_status;
+                guint16 mode_framerate_has_priority = 0x0001;
+                guint32 framerate, framerate_exposure; //Exposure time is in ns
+                library_errors = PCO_GetFrameRate(priv->pcoHandle, &framerate_status, &framerate, &framerate_exposure);
+                framerate = g_value_get_double(value) * 1000;
+                library_errors = PCO_SetFrameRate(priv->pcoHandle, &framerate_status, mode_framerate_has_priority, framerate, framerate_exposure);
+                // @ToDo. framerate_status variables hold information if the desired framerate was trimmed because of other settings
+            }
+            break;
+        case PROP_SENSOR_PIXELRATE:
+            {
+                guint32 pixelrate; // user defined pixelrate in Hz
+                guint32 pixelrate_to_set = 0;
+                pixelrate = g_value_get_uint(value);
+                for(int i=0; i< priv->possible_pixelrates->n_values; i++)
+                {
+                    if(g_value_get_uint(g_value_array_get_nth(priv->possible_pixelrates,i)) == pixelrate)
+                    {
+                        pixelrate_to_set = pixelrate;
+                        break;
+                    }
+                }
+                if(pixelrate_to_set)
+                    library_errors = PCO_SetPixelRate(priv->pcoHandle, pixelrate_to_set);
+                else
+                    g_warning("Pixelrate is not set. %d Hz is not in the range of possible pixelrates. Check \'sensor-pixelrates\' property",pixelrate);
+            }
+            break;
+        case PROP_OFFSET_MODE:
+            library_errors = PCO_SetOffsetMode(priv->pcoHandle, g_value_get_boolean(value) ? 1 : 0);
+            break;
+        case PROP_COOLING_POINT:
+            {
+                gint16 temperature;
+                temperature = (gint16)g_value_get_int(value);
+                library_errors = PCO_SetCoolingSetpointTemperature(priv->pcoHandle, temperature);
+            }
+            break;
+        case PROP_RECORD_MODE:
+            {
+                UcaPcoCameraRecordMode subMode = (UcaPcoCameraRecordMode) g_value_get_enum(value);
+
+                switch(subMode)
+                {
+                    case UCA_PCO_CAMERA_RECORD_MODE_SEQUENCE:
+                        library_errors = PCO_SetRecorderSubmode(priv->pcoHandle,RECORDER_SUBMODE_SEQUENCE);
+                        break;
+                    case UCA_PCO_CAMERA_RECORD_MODE_RING_BUFFER:
+                        library_errors = PCO_SetRecorderSubmode(priv->pcoHandle, RECORDER_SUBMODE_RINGBUFFER);
+                        break;
+                }
+            }
+            break;
+        case PROP_STORAGE_MODE:
+            {
+                UcaPcoCameraStorageMode storageMode = (UcaPcoCameraStorageMode) g_value_get_enum(value);
+
+                switch (storageMode)
+                {
+                    case UCA_PCO_CAMERA_STORAGE_MODE_RECORDER:
+                        library_errors = PCO_SetStorageMode (priv->pcoHandle, STORAGE_MODE_RECORDER);
+                        break;
+                    case UCA_PCO_CAMERA_STORAGE_MODE_FIFO_BUFFER:
+                        library_errors = PCO_SetStorageMode (priv->pcoHandle, STORAGE_MODE_FIFO_BUFFER);
+                        break;
+                }
+            }
+            break;
+        case PROP_ACQUIRE_MODE:
+            {
+                UcaPcoCameraAcquireMode acqMode = (UcaPcoCameraAcquireMode) g_value_get_enum(value);
+
+                switch (acqMode)
+                {
+                    case UCA_PCO_CAMERA_ACQUIRE_MODE_AUTO:
+                        library_errors = PCO_SetAcquireMode (priv->pcoHandle, ACQUIRE_MODE_AUTO);
+                        break;
+                    case UCA_PCO_CAMERA_ACQUIRE_MODE_EXTERNAL:
+                        library_errors = PCO_SetAcquireMode (priv->pcoHandle, ACQUIRE_MODE_EXTERNAL);
+                        break;
+                }
+            }
+            break;
+        case PROP_TRIGGER_SOURCE:
+            {
+                UcaCameraTriggerSource triggerMode = (UcaCameraTriggerSource) g_value_get_enum(value);
+
+                switch (triggerMode) {
+                    case UCA_CAMERA_TRIGGER_SOURCE_AUTO:
+                        library_errors = PCO_SetTriggerMode(priv->pcoHandle, TRIGGER_MODE_AUTOTRIGGER);
+                        break;
+                    case UCA_CAMERA_TRIGGER_SOURCE_SOFTWARE:
+                        library_errors = PCO_SetTriggerMode(priv->pcoHandle, TRIGGER_MODE_SOFTWARETRIGGER);
+                        break;
+                    case UCA_CAMERA_TRIGGER_SOURCE_EXTERNAL:
+                        library_errors = PCO_SetTriggerMode(priv->pcoHandle, TRIGGER_MODE_EXTERNALTRIGGER);
+                        break;
+                    default:
+                        g_warning("Trigger mode provided by camera cannot be handled");
+                }
+            }
+            break;
+        default:
+            g_warning("Undefined Property");
+    }
+
+    if(library_errors)
+    {
+        PCO_GetErrorText(library_errors,error_text, ERROR_TEXT_BUFFER_SIZE);
+        g_set_error (&priv->construct_error,
+                     UCA_PCOWIN_CAMERA_ERROR, UCA_PCOWIN_CAMERA_ERROR_SETTER,
+                     "Failed to set property %s. Here's error code 0x%X for enquiring minds.\nSDK Error Text: %s", pco_properties[property_id]->name, library_errors, error_text);
+    }
 }
 
 static void
 uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value, GParamSpec *pspec)
 {
     UcaPcowinCameraPrivate *priv;
-    int libraryErrors;
+    int library_errors;
     
     priv = UCA_PCOWIN_CAMERA_GET_PRIVATE(object);
     
@@ -192,37 +504,37 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
         case PROP_SENSOR_EXTENDED:
         {
             guint16 format;
-            libraryErrors = PCO_GetSensorFormat(priv->pcoHandle,&format);
-            g_value_set_boolean(value, (format==1));
+            library_errors = PCO_GetSensorFormat(priv->pcoHandle,&format);
+            g_value_set_boolean(value, (format==SENSORFORMAT_EXTENDED));
         }
             break;
         case PROP_SENSOR_WIDTH_EXTENDED:
-            g_value_set_uint(value, priv->strDescription.wMaxHorzResExtDESC < priv->strDescription.wMaxHorzResStdDESC ? priv->strDescription.wMaxHorzResStdDESC : priv->strDescription.wMaxHorzResExtDESC);
+            g_value_set_uint(value, priv->width_ex < priv->width ? priv->width : priv->width_ex);
             break;
         case PROP_SENSOR_HEIGHT_EXTENDED:
-            g_value_set_uint(value, priv->strDescription.wMaxVertResExtDESC < priv->strDescription.wMaxVertResStdDESC ? priv->strDescription.wMaxVertResStdDESC : priv->strDescription.wMaxVertResExtDESC);
+            g_value_set_uint(value, priv->height_ex < priv->height ? priv->height : priv->height_ex);
             break;
         case PROP_SENSOR_TEMPERATURE:
         {
             short ccdTemp, camTemp, powTemp;
-            libraryErrors = PCO_GetTemperature(priv->pcoHandle,&ccdTemp, &camTemp, &powTemp);
+            library_errors = PCO_GetTemperature(priv->pcoHandle,&ccdTemp, &camTemp, &powTemp);
             g_value_set_double(value,ccdTemp/10);
         }
             break;
         case PROP_SENSOR_PIXELRATES:
-            //Ask
+            g_value_set_boxed(value, priv->possible_pixelrates);
             break;
         case PROP_SENSOR_PIXELRATE:
         {
             guint32 pixelrate; // pixelrate in Hz
-            libraryErrors = PCO_GetPixelRate(priv->pcoHandle, &pixelrate);
+            library_errors = PCO_GetPixelRate(priv->pcoHandle, &pixelrate);
             g_value_set_uint(value, pixelrate);
         }
             break;
         case PROP_OFFSET_MODE:
             {
                 guint16 offsetRegulation;
-                libraryErrors = PCO_GetOffsetMode(priv->pcoHandle, &offsetRegulation);
+                library_errors = PCO_GetOffsetMode(priv->pcoHandle, &offsetRegulation);
                 g_value_set_boolean(value, offsetRegulation ? TRUE: FALSE);
             }
             break;
@@ -230,7 +542,7 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
             {
                 // Only available if the storage mode is set to recorder
                 guint16 recorderSubmode;
-                libraryErrors = PCO_GetRecorderSubmode(priv->pcoHandle, &recorderSubmode);
+                library_errors = PCO_GetRecorderSubmode(priv->pcoHandle, &recorderSubmode);
 
                 switch(recorderSubmode)
                 {
@@ -246,7 +558,7 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
         case PROP_STORAGE_MODE:
             {
                 guint16 storageMode;
-                libraryErrors = PCO_GetStorageMode(priv->pcoHandle, &storageMode);
+                library_errors = PCO_GetStorageMode(priv->pcoHandle, &storageMode);
 
                 switch (storageMode)
                 {
@@ -262,7 +574,7 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
         case PROP_ACQUIRE_MODE:
             {
                 guint16 acqMode;
-                libraryErrors = PCO_GetAcquireMode(priv->pcoHandle, &acqMode);
+                library_errors = PCO_GetAcquireMode(priv->pcoHandle, &acqMode);
 
                 switch (acqMode)
                 {
@@ -278,11 +590,10 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
         case PROP_COOLING_POINT:
             {
                 gint16 coolingSetPoint;
-                libraryErrors = PCO_GetCoolingSetpointTemperature(priv->pcoHandle, &coolingSetPoint);
+                library_errors = PCO_GetCoolingSetpointTemperature(priv->pcoHandle, &coolingSetPoint);
                 g_value_set_int(value, coolingSetPoint);
             }
             break;
-
         case PROP_COOLING_POINT_MIN:
             g_value_set_int(value,priv->strDescription.sMinCoolSetDESC);
             break;
@@ -294,40 +605,85 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
             break;
         // Generic UCA Properties
         case PROP_SENSOR_WIDTH:
-            g_value_set_uint(value, priv->strDescription.wMaxHorzResStdDESC);
+            g_value_set_uint(value, priv->width);
             break;
         case PROP_SENSOR_HEIGHT:
-            g_value_set_uint(value, priv->strDescription.wMaxVertResStdDESC);
+            g_value_set_uint(value, priv->height);
             break;
         case PROP_SENSOR_PIXEL_WIDTH:
-            // Ask
+            switch (priv->strCamType.wCamType) {
+                case CAMERATYPE_PCO_EDGE:
+                    g_value_set_double (value, 0.0000065);
+                    break;
+                case CAMERATYPE_PCO_EDGE_GL:
+                    g_value_set_double (value, 0.0000065);
+                    break;
+                case CAMERATYPE_PCO_DIMAX_STD:
+                    g_value_set_double (value, 0.0000110);
+                    break;
+                case CAMERATYPE_PCO4000:
+                    g_value_set_double (value, 0.0000090);
+                    break;
+            }
             break;
         case PROP_SENSOR_PIXEL_HEIGHT:
-            // Ask
+            switch (priv->strCamType.wCamType) {
+                case CAMERATYPE_PCO_EDGE:
+                    g_value_set_double (value, 0.0000065);
+                    break;
+                case CAMERATYPE_PCO_EDGE_GL:
+                    g_value_set_double (value, 0.0000065);
+                    break;
+                case CAMERATYPE_PCO_DIMAX_STD:
+                    g_value_set_double (value, 0.0000110);
+                    break;
+                case CAMERATYPE_PCO4000:
+                    g_value_set_double (value, 0.0000090);
+                    break;
+            }
             break;
         case PROP_SENSOR_HORIZONTAL_BINNING:
-            g_value_set_uint(value, priv->strSensor.wBinHorz);
+            {
+                PCO_GetBinning(priv->pcoHandle, &priv->horizontal_binning, &priv->vertical_binning);
+                g_value_set_uint(value, priv->horizontal_binning);
+            }
             break;
         case PROP_SENSOR_VERTICAL_BINNING:
-            g_value_set_uint(value, priv->strSensor.wBinVert);
+            {
+                PCO_GetBinning(priv->pcoHandle, &priv->horizontal_binning, &priv->vertical_binning);
+                g_value_set_uint(value, priv->vertical_binning);
+            }
             break;
         case PROP_SENSOR_BITDEPTH:
-            // Ask
+            switch (priv->strCamType.wCamType) {
+                case CAMERATYPE_PCO4000:
+                    g_value_set_uint(value, 14);
+                    break;
+                case CAMERATYPE_PCO_EDGE:
+                    g_value_set_uint(value, 16);
+                    break;
+                case CAMERATYPE_PCO_EDGE_GL:
+                    g_value_set_uint(value, 16);
+                    break;
+                case CAMERATYPE_PCO_DIMAX_STD:
+                    g_value_set_uint(value, 12);
+                    break;
+            }
             break;
         case PROP_EXPOSURE_TIME:
         {
             guint32 delay, exposure;
-            short delayTimeBase, exposureTimeBase;
-            libraryErrors = PCO_GetDelayExposureTime(priv->pcoHandle, &delay, &exposure, &delayTimeBase, &exposureTimeBase);
-            g_value_set_double(value, map_timebase(exposureTimeBase) * exposure);
+            short delay_time_base, exposure_time_base;
+            library_errors = PCO_GetDelayExposureTime(priv->pcoHandle, &delay, &exposure, &delay_time_base, &exposure_time_base);
+            g_value_set_double(value, map_timebase(exposure_time_base) * exposure);
         }
             break;
         case PROP_FRAMES_PER_SECOND:
         {
             // Works for dimax and edge only
-            guint16 framerateStatus;
-            guint32 framerate, framerateExposure;
-            libraryErrors = PCO_GetFrameRate(priv->pcoHandle, &framerateStatus, &framerate, &framerateExposure);
+            guint16 framerate_status;
+            guint32 framerate, framerate_exposure;
+            library_errors = PCO_GetFrameRate(priv->pcoHandle, &framerate_status, &framerate, &framerate_exposure);
             g_value_set_double(value, framerate / 1000); //mHz to Hz
         }
             break;
@@ -336,26 +692,24 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
             break;
 
         case PROP_HAS_CAMRAM_RECORDING:
-            // @ToDo. PCI Dimax has camRAM, but few PCO cameras do not. Replace this for expanding this plugin for other cameras
+            // @ToDo. PCI Dimax has camRAM, but few PCO cameras do not. Replace this for expanding uca-pco-win plugin for other cameras
             g_value_set_boolean(value, TRUE);
             break;
 
         case PROP_RECORDED_FRAMES:
         {
             // This number is dynamic if the camera is running in recorder mode or in FIFO buffer mode. Result is accurate when recording is stopped
-            guint16 segment;
-            guint32 validImages, maxImages;
-            libraryErrors = PCO_GetActiveRamSegment(priv->pcoHandle, &segment);
-            libraryErrors = PCO_GetNumberOfImagesInSegment(priv->pcoHandle, segment, &validImages, &maxImages);
-            g_value_set_uint(value, validImages);
+            guint32 valid_images, max_images;
+            library_errors = PCO_GetNumberOfImagesInSegment(priv->pcoHandle, priv->active_ram_segment, &valid_images, &max_images);
+            g_value_set_uint(value, valid_images);
         }
             break;      
         case PROP_TRIGGER_SOURCE:
         {
-            guint16 triggerMode;
-            libraryErrors = PCO_GetTriggerMode(priv->pcoHandle, &triggerMode);
+            guint16 trigger_mode;
+            library_errors = PCO_GetTriggerMode(priv->pcoHandle, &trigger_mode);
 
-            switch (triggerMode) {
+            switch (trigger_mode) {
                 case TRIGGER_MODE_AUTOTRIGGER:
                     g_value_set_enum(value, UCA_CAMERA_TRIGGER_SOURCE_AUTO);
                     break;
@@ -383,10 +737,10 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
             g_value_set_uint(value, priv->roi_height);
             break;
         case PROP_ROI_WIDTH_MULTIPLIER:
-            g_value_set_uint(value, priv->strDescription.wRoiHorStepsDESC);
+            g_value_set_uint(value, priv->roi_horizontal_steps);
             break;
         case PROP_ROI_HEIGHT_MULTIPLIER:
-            g_value_set_uint(value, priv->strDescription.wRoiVertStepsDESC);
+            g_value_set_uint(value, priv->roi_vertical_steps);
             break;
         case PROP_NAME:
             g_value_set_string (value, "pco for windows");
@@ -399,19 +753,21 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
             break;
         case PROP_IS_RECORDING:
             {
-                // @ToDo. Find if camera is recording. PCO_GetRecordingState maybe ??
-                g_value_set_boolean(value,FALSE);
+                guint16 recording_state;
+                library_errors = PCO_GetRecordingState(priv->pcoHandle, &recording_state);
+                g_value_set_boolean(value, recording_state ? TRUE: FALSE);
             }
             break;
         default:
             g_warning("Undefined Property");
     }
 
-    if(libraryErrors)
+    if(library_errors)
     {
+        PCO_GetErrorText(library_errors, error_text, ERROR_TEXT_BUFFER_SIZE);
         g_set_error (&priv->construct_error,
                      UCA_PCOWIN_CAMERA_ERROR, UCA_PCOWIN_CAMERA_ERROR_GETTER,
-                     "Failed to get property %s from library. Here's error code 0x%X for enquiring minds", pco_properties[property_id]->name ,libraryErrors);
+                     "Failed to set property %s. Here's error code 0x%X for enquiring minds.\nSDK Error Text: %s", pco_properties[property_id]->name, library_errors, error_text);
     }
 }
 
@@ -420,8 +776,12 @@ uca_pcowin_camera_finalize(GObject *object)
 {
     UcaPcowinCameraPrivate *priv = UCA_PCOWIN_CAMERA_GET_PRIVATE(object);
     
+    // Clearing all allocated memories
+    if(priv->possible_pixelrates)
+        g_value_array_free(priv->possible_pixelrates);
     g_clear_error (&priv->construct_error);
-    
+    PCO_FreeBuffer (pco_properties, priv->buffer_number);
+
     PCO_CloseCamera (priv->pcoHandle);
 
     G_OBJECT_CLASS (uca_pcowin_camera_parent_class)->finalize(object);
@@ -585,6 +945,42 @@ uca_pcowin_camera_class_init(UcaPcowinCameraClass *klass)
     g_type_class_add_private(klass, sizeof (UcaPcowinCameraPrivate));
 }
 
+static void
+property_override_default_guint_value (GObjectClass *oclass, const gchar *property_name, guint new_default)
+{
+    GParamSpecUInt *pspec = G_PARAM_SPEC_UINT (g_object_class_find_property (oclass, property_name));
+
+    if (pspec != NULL)
+        pspec->default_value = new_default;
+    else
+        g_warning ("pspec for %s not found\n", property_name);
+}
+
+static void
+set_default_properties(UcaPcowinCamera *camera)
+{
+    UcaPcowinCameraPrivate *priv;
+    GObjectClass *oclass;
+
+    priv = UCA_PCOWIN_CAMERA_GET_PRIVATE(camera);
+    oclass = G_OBJECT_CLASS (UCA_PCOWIN_CAMERA_GET_CLASS(camera));
+
+    // Get possible pixel rates from PCO Description and set default pixelrate
+    GValue temporary = {0};
+    g_value_init(&temporary, G_TYPE_UINT);
+    priv->possible_pixelrates = g_value_array_new(4);
+    for(int i=0; i< 4; i++) // SDK provides 4 possible pixelrate
+    {
+        g_value_set_uint(&temporary, (guint) priv->strDescription.dwPixelRateDESC[i]);
+        g_value_array_append(priv->possible_pixelrates, &temporary);
+    }
+    property_override_default_guint_value (oclass, "sensor-pixelrate", priv->strDescription.dwPixelRateDESC[0]);
+
+    property_override_default_guint_value (oclass, "roi-width", priv->width);
+    property_override_default_guint_value (oclass, "roi-height", priv->height);
+    //Temperature & ADCS
+}
+
 static gint
 setupsdk_and_opencamera (UcaPcowinCameraPrivate *priv, UcaPcowinCamera *camera)
 {
@@ -606,6 +1002,7 @@ setupsdk_and_opencamera (UcaPcowinCameraPrivate *priv, UcaPcowinCamera *camera)
     error = PCO_OpenCamera(&priv->pcoHandle, 0);
     if(0 == error)
     {
+        // @ToDo. Do error checking for the following functions. Remove unnecessary calls
         PCO_GetGeneral (priv->pcoHandle, &priv->strGeneral);
         PCO_GetCameraType (priv->pcoHandle, &priv->strCamType);
         PCO_GetSensorStruct (priv->pcoHandle, &priv->strSensor);
@@ -613,14 +1010,23 @@ setupsdk_and_opencamera (UcaPcowinCameraPrivate *priv, UcaPcowinCamera *camera)
         PCO_GetTimingStruct (priv->pcoHandle, &priv->strTiming);
         PCO_GetRecordingStruct (priv->pcoHandle, &priv->strRecording);
 
-        // There variables are used in 4 cases of get_parameters function
+        // UcaCamera variables are filled with initial values from camera description or sensor
         PCO_GetROI(priv->pcoHandle, &roi[0], &roi[1], &roi[2], &roi[3]);
         priv->roi_x = roi[0] - 1;
         priv->roi_y = roi[1] - 1;
         priv->roi_width = roi[2] - roi[0] + 1;
         priv->roi_height = roi[3] - roi[1] + 1;
+        priv->roi_horizontal_steps= priv->strDescription.wRoiHorStepsDESC;
+        priv->roi_vertical_steps= priv->strDescription.wRoiVertStepsDESC;
 
-        
+        priv->width = priv->strDescription.wMaxHorzResStdDESC;
+        priv->height = priv->strDescription.wMaxVertResStdDESC;
+        priv->width_ex = priv->strDescription.wMaxHorzResExtDESC;
+        priv->height_ex = priv->strDescription.wMaxVertResExtDESC;
+
+        PCO_GetBinning(priv->pcoHandle, &priv->horizontal_binning, &priv->vertical_binning);
+
+        PCO_GetActiveRamSegment(priv->pcoHandle, &priv->active_ram_segment);
     }
     return error;
 }
@@ -636,12 +1042,15 @@ uca_pcowin_camera_init(UcaPcowinCamera *self)
     priv->construct_error = NULL;
     
     error = setupsdk_and_opencamera (priv,self);
-    if(error)
+    if(!error)
     {
+        PCO_GetErrorText(error, error_text, ERROR_TEXT_BUFFER_SIZE);
         g_set_error (&priv->construct_error,
                      UCA_PCOWIN_CAMERA_ERROR, UCA_PCOWIN_CAMERA_ERROR_SDK_INIT,
-                     "Initialization of SDK Failed. Here's error code 0x%X for enquiring minds", error);
+                     "Initialization of SDK Failed. Here's error code 0x%X for enquiring minds.\nSDK Error Text: %s", error, error_text);
     }
+
+    set_default_properties(self);
     
     camera = UCA_CAMERA (self);
     uca_camera_register_unit (camera, "sensor-width-extended", UCA_UNIT_PIXEL);
