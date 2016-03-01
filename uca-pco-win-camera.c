@@ -113,6 +113,7 @@ static char error_text[ERROR_TEXT_BUFFER_SIZE];
 struct _UcaPcowinCameraPrivate {
     
     HANDLE pcoHandle;
+    HANDLE handleEvent;
     
     GError *construct_error;
     
@@ -128,12 +129,13 @@ struct _UcaPcowinCameraPrivate {
     guint16 roi_width, roi_height;
     guint16 roi_horizontal_steps, roi_vertical_steps;
     guint16 width, height, width_ex, height_ex;
+    guint16 x_act, y_act;
     guint16 horizontal_binning, vertical_binning;
     GValueArray *possible_pixelrates;
 
     // With buff number = -1 and bufferPointer set to 0. SDK allocated a buffer for us
     gint16 buffer_number; 
-    guint16 buffer_pointer;
+    guint16 *buffer_pointer;
     guint32 buffer_size;
     guint16 active_ram_segment;
     guint16 numberof_recorded_images;
@@ -152,12 +154,6 @@ map_timebase(short timebase)
         default:
             return 1e-3;
     }
-}
-
-static gpointer
-pcowin_grab_func(gpointer data)
-{
-
 }
 
 static void
@@ -192,7 +188,7 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
         binned_height = priv->height;
     }
 
-    // For priliminary tests
+    // For priliminary tests. @ToDo Clenup
     priv->horizontal_binning = priv->vertical_binning = 1;
 
     // The following peice of code make sures that the ROI defined is not beyond the limits of available area binning
@@ -210,7 +206,7 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
     
     guint16 roi[4] = { priv->roi_x + 1, priv->roi_y + 1, priv->roi_x + priv->roi_width, priv->roi_y + priv->roi_height };
-    library_errors = PCO_SetROI(priv->pcoHandle, &roi[0], &roi[1], &roi[2], &roi[3]);
+    library_errors = PCO_SetROI(priv->pcoHandle, roi[0], roi[1], roi[2], roi[3]);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
 
     // Trigger mode is auto in camera default settings
@@ -232,13 +228,16 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
     library_errors = PCO_GetSizes(priv->pcoHandle, &x_act, &y_act, &x_max, &y_max);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
     // @ToDo. Implement checks to verify if the sizes received from camera are same as ROI
+    priv->x_act = x_act;
+    priv->y_act = y_act;
 
     // Allocation of buffer. Driver allocates a number if buffer number is set to -1
     priv->buffer_number = -1; 
-    priv->buffer_pointer = NULL;
     priv->buffer_size = x_act * y_act * 2;
+    priv->buffer_pointer = NULL;
+    priv->handleEvent = NULL;
 
-    library_errors = PCO_AllocateBuffer(priv->pcoHandle, &priv->buffer_number, priv->buffer_size, &priv->buffer_pointer, NULL);
+    library_errors = PCO_AllocateBuffer(priv->pcoHandle, &priv->buffer_number, priv->buffer_size, &priv->buffer_pointer, &priv->handleEvent);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
 
     library_errors = PCO_CamLinkSetImageParameters(priv->pcoHandle, x_act, y_act);
@@ -307,10 +306,45 @@ uca_pcowin_camera_trigger (UcaCamera *camera, GError **error)
     }
 }
 
+static void
+adjust_buffer_size (UcaPcowinCameraPrivate *priv)
+{
+
+}
+
 static gboolean
 uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
 {
+    int library_errors;
+    UcaPcowinCameraPrivate *priv;
 
+    g_return_if_fail(UCA_IS_PCOWIN_CAMERA(camera));
+
+    priv=UCA_PCOWIN_CAMERA_GET_PRIVATE(camera);
+
+    /*
+    This function acts similar to AddBufferEx. i.e to view images while recording is enabled. 
+    Except event handeling is not required.
+    Fn returns only when the image is transferred to memory (5 sec timeout)
+    0,0 transfers most recent image. 1,1 could be used to transfer the first captured image ?
+    firstImage and LastImage of the segment can be used to bulk read images from camRAM. 
+    Note. Make sure buffersize of appropriate buffernumber is sufficient enough when transferring multiple images.
+    */
+    guint32 pixel_rate;
+    PCO_GetPixelRate(priv->pcoHandle, &pixel_rate);
+    PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, 0, 0, priv->buffer_number, priv->x_act, priv->y_act, pixel_rate);
+    memcpy((gchar *) data, (gchar *) priv->buffer_pointer, priv->buffer_size);
+
+    /*
+    "is_readout" is set in uca_camera_start_readout.
+
+    if(is_readout)
+    {
+        adjust_buffer_size(priv); // Change buffer size according to the no of images present in camRAM
+    }
+    */
+
+    return TRUE;
 }
 
 static gboolean
@@ -780,7 +814,7 @@ uca_pcowin_camera_finalize(GObject *object)
     if(priv->possible_pixelrates)
         g_value_array_free(priv->possible_pixelrates);
     g_clear_error (&priv->construct_error);
-    PCO_FreeBuffer (pco_properties, priv->buffer_number);
+    PCO_FreeBuffer (priv->pcoHandle, priv->buffer_number);
 
     PCO_CloseCamera (priv->pcoHandle);
 
