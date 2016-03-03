@@ -9,7 +9,7 @@ include(ConfigurePaths)
 include(Glib2MkEnums)
 configure_paths(LIBUCA)
 
-add_definitions("-std=c99 -Wall")
+add_definitions("-std=c99 -w")
 add_definitions(-DG_LOG_DOMAIN="UCA-PCO-WIN")
 
 pkg_check_modules(UCA libuca>=2.1.0 REQUIRED)

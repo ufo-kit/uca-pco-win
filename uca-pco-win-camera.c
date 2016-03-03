@@ -25,6 +25,10 @@ Notes:
 #define SENSORFORMAT_STANDARD           0x0000
 #define SENSORFORMAT_EXTENDED           0x0001
 #define ERROR_TEXT_BUFFER_SIZE          500
+#define TIMESTAMP_MODE_OFF              0x0000
+#define TIMESTAMP_MODE_BINARY           0x0001
+#define TIMESTAMP_MODE_BINARYANDASCII   0x0002
+#define TIMESTAMP_MODE_ASCII            0x0003  // Not available in dimax
 
 #define UCA_PCOWIN_CAMERA_GET_PRIVATE(obj) (G_TYPE_INSTANCE_GET_PRIVATE((obj), UCA_TYPE_PCOWIN_CAMERA, UcaPcowinCameraPrivate))
 
@@ -58,17 +62,17 @@ enum {
     //PROP_SENSOR_MAX_ADCS,
     //PROP_HAS_DOUBLE_IMAGE_MODE,
     //PROP_DOUBLE_IMAGE_MODE,
-    PROP_OFFSET_MODE,
+    //PROP_OFFSET_MODE,
     PROP_RECORD_MODE,
     PROP_STORAGE_MODE,
     PROP_ACQUIRE_MODE,
     //PROP_FAST_SCAN,
-    PROP_COOLING_POINT,
+    //PROP_COOLING_POINT,
     PROP_COOLING_POINT_MIN,
     PROP_COOLING_POINT_MAX,
     PROP_COOLING_POINT_DEFAULT,
     //PROP_NOISE_FILTER,
-    //PROP_TIMESTAMP_MODE,
+    PROP_TIMESTAMP_MODE,
     PROP_VERSION,
     //PROP_EDGE_GLOBAL_SHUTTER,
     //PROP_FRAME_GRABBER_TIMEOUT,
@@ -138,7 +142,7 @@ struct _UcaPcowinCameraPrivate {
     guint16 *buffer_pointer;
     guint32 buffer_size;
     guint16 active_ram_segment;
-    guint16 numberof_recorded_images;
+    guint32 numberof_recorded_images, camram_max_images, current_image;
 
     UcaCameraTriggerSource trigger_source;
 };
@@ -272,6 +276,11 @@ uca_pcowin_camera_stop_recording(UcaCamera *camera, GError **error)
 static void
 uca_pcowin_camera_start_readout(UcaCamera *camera, GError **error)
 {
+    UcaPcowinCameraPrivate *priv;
+    g_return_if_fail(UCA_IS_PCOWIN_CAMERA(camera));
+    priv=UCA_PCOWIN_CAMERA_GET_PRIVATE(camera);
+
+    priv->current_image = 1;
 }
 
 static void
@@ -317,6 +326,8 @@ uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
 {
     int library_errors;
     UcaPcowinCameraPrivate *priv;
+    gboolean is_readout;
+    guint32 image_index_to_transfer = 0;
 
     g_return_if_fail(UCA_IS_PCOWIN_CAMERA(camera));
 
@@ -332,17 +343,20 @@ uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
     */
     guint32 pixel_rate;
     PCO_GetPixelRate(priv->pcoHandle, &pixel_rate);
-    PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, 0, 0, priv->buffer_number, priv->x_act, priv->y_act, pixel_rate);
-    memcpy((gchar *) data, (gchar *) priv->buffer_pointer, priv->buffer_size);
-
-    /*
-    "is_readout" is set in uca_camera_start_readout.
-
+    // "is_readout" is set in uca_camera_start_readout.
+    g_object_get (G_OBJECT (camera), "is-readout", &is_readout, NULL);
     if(is_readout)
     {
-        adjust_buffer_size(priv); // Change buffer size according to the no of images present in camRAM
+        // This condition affects by terminating infinite while in camera control GUI or does it ;)
+        if(priv->current_image == priv->numberof_recorded_images)
+            return NULL;
+
+        image_index_to_transfer = priv->current_image;
+        priv->current_image ++;
     }
-    */
+    library_errors = PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, image_index_to_transfer, image_index_to_transfer, priv->buffer_number, priv->x_act, priv->y_act, pixel_rate);
+    CHECK_FOR_PCO_SDK_ERROR(library_errors);
+    memcpy((gchar *) data, (gchar *) priv->buffer_pointer, priv->buffer_size);
 
     return TRUE;
 }
@@ -401,11 +415,12 @@ uca_pcowin_camera_set_property (GObject *object, guint property_id, const GValue
             break;
         case PROP_EXPOSURE_TIME:
             {
-                guint32 delay, exposure;
-                short delay_time_base, exposure_time_base;
-                library_errors = PCO_GetDelayExposureTime(priv->pcoHandle, &delay, &exposure, &delay_time_base, &exposure_time_base);
-                exposure = (guint32) g_value_get_double(value) / exposure_time_base;
-                library_errors = PCO_SetDelayExposureTime(priv->pcoHandle, delay, exposure, delay_time_base, exposure_time_base);
+                guint16 framerate_status;
+                guint16 mode_exposure_has_priority = 0x0002;
+                guint32 framerate, framerate_exposure; //Exposure time is in ns
+                library_errors = PCO_GetFrameRate(priv->pcoHandle, &framerate_status, &framerate, &framerate_exposure);
+                framerate_exposure = g_value_get_double(value) * 1000 * 1000 * 1000;
+                library_errors = PCO_SetFrameRate(priv->pcoHandle, &framerate_status, mode_exposure_has_priority, &framerate, &framerate_exposure);
             }
             break;
         case PROP_FRAMES_PER_SECOND:
@@ -416,7 +431,7 @@ uca_pcowin_camera_set_property (GObject *object, guint property_id, const GValue
                 guint32 framerate, framerate_exposure; //Exposure time is in ns
                 library_errors = PCO_GetFrameRate(priv->pcoHandle, &framerate_status, &framerate, &framerate_exposure);
                 framerate = g_value_get_double(value) * 1000;
-                library_errors = PCO_SetFrameRate(priv->pcoHandle, &framerate_status, mode_framerate_has_priority, framerate, framerate_exposure);
+                library_errors = PCO_SetFrameRate(priv->pcoHandle, &framerate_status, mode_framerate_has_priority, &framerate, &framerate_exposure);
                 // @ToDo. framerate_status variables hold information if the desired framerate was trimmed because of other settings
             }
             break;
@@ -439,16 +454,24 @@ uca_pcowin_camera_set_property (GObject *object, guint property_id, const GValue
                     g_warning("Pixelrate is not set. %d Hz is not in the range of possible pixelrates. Check \'sensor-pixelrates\' property",pixelrate);
             }
             break;
-        case PROP_OFFSET_MODE:
-            library_errors = PCO_SetOffsetMode(priv->pcoHandle, g_value_get_boolean(value) ? 1 : 0);
+        /*case PROP_OFFSET_MODE:
+            {
+                // PCO_SetOffsetMode is available only for pco.1400, pco.pixelfly.usb, pco.1300. @ToDo implement proper checks
+                if(CAMERATYPE_PCO_DIMAX_STD != priv->strCamType.wCamType)
+                    library_errors = PCO_SetOffsetMode(priv->pcoHandle, g_value_get_boolean(value) ? 1 : 0);    
+            }
             break;
         case PROP_COOLING_POINT:
             {
+                // PCO_SetCoolingSetpointTemperature is only available for 1300,1600,2000,4000. @ToDo implement proper checks
                 gint16 temperature;
-                temperature = (gint16)g_value_get_int(value);
-                library_errors = PCO_SetCoolingSetpointTemperature(priv->pcoHandle, temperature);
+                if(CAMERATYPE_PCO_DIMAX_STD != priv->strCamType.wCamType)
+                {
+                    temperature = (gint16)g_value_get_int(value);
+                    library_errors = PCO_SetCoolingSetpointTemperature(priv->pcoHandle, temperature);
+                }
             }
-            break;
+            break;*/
         case PROP_RECORD_MODE:
             {
                 UcaPcoCameraRecordMode subMode = (UcaPcoCameraRecordMode) g_value_get_enum(value);
@@ -513,6 +536,25 @@ uca_pcowin_camera_set_property (GObject *object, guint property_id, const GValue
                 }
             }
             break;
+        case PROP_TIMESTAMP_MODE:
+            {
+                UcaPcoCameraTimestamp timestamp_mode = g_value_get_enum(value);
+                switch(timestamp_mode) {
+                    case UCA_PCO_CAMERA_TIMESTAMP_NONE:
+                        PCO_SetTimestampMode (priv->pcoHandle, TIMESTAMP_MODE_OFF);
+                        break;
+                    case UCA_PCO_CAMERA_TIMESTAMP_BINARY:
+                        PCO_SetTimestampMode (priv->pcoHandle, TIMESTAMP_MODE_BINARY);
+                        break;
+                    case UCA_PCO_CAMERA_TIMESTAMP_BINARYANDASCII:
+                        PCO_SetTimestampMode (priv->pcoHandle, TIMESTAMP_MODE_BINARYANDASCII);
+                        break;
+                    case UCA_PCO_CAMERA_TIMESTAMP_ASCII:
+                        PCO_SetTimestampMode (priv->pcoHandle, TIMESTAMP_MODE_ASCII);
+                        break;
+                }
+            }
+            break;
         default:
             g_warning("Undefined Property");
     }
@@ -520,9 +562,7 @@ uca_pcowin_camera_set_property (GObject *object, guint property_id, const GValue
     if(library_errors)
     {
         PCO_GetErrorText(library_errors,error_text, ERROR_TEXT_BUFFER_SIZE);
-        g_set_error (&priv->construct_error,
-                     UCA_PCOWIN_CAMERA_ERROR, UCA_PCOWIN_CAMERA_ERROR_SETTER,
-                     "Failed to set property %s. Here's error code 0x%X for enquiring minds.\nSDK Error Text: %s", pco_properties[property_id]->name, library_errors, error_text);
+        g_warning ("Failed to set property %s. Here's error code 0x%X for enquiring minds.\nSDK Error Text: %s", pco_properties[property_id]->name, library_errors, error_text);
     }
 }
 
@@ -565,13 +605,16 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
             g_value_set_uint(value, pixelrate);
         }
             break;
-        case PROP_OFFSET_MODE:
+        /*case PROP_OFFSET_MODE:
             {
-                guint16 offsetRegulation;
-                library_errors = PCO_GetOffsetMode(priv->pcoHandle, &offsetRegulation);
+                guint16 offsetRegulation = FALSE;
+                if(CAMERATYPE_PCO_DIMAX_STD != priv->strCamType.wCamType || CAMERATYPE_PCO_EDGE != priv->strCamType.wCamType)
+                {
+                    library_errors = PCO_GetOffsetMode(priv->pcoHandle, &offsetRegulation);    
+                }
                 g_value_set_boolean(value, offsetRegulation ? TRUE: FALSE);
             }
-            break;
+            break;*/
         case PROP_RECORD_MODE:
             {
                 // Only available if the storage mode is set to recorder
@@ -621,13 +664,14 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
                 }
             }
             break;
-        case PROP_COOLING_POINT:
+        /*case PROP_COOLING_POINT:
             {
-                gint16 coolingSetPoint;
-                library_errors = PCO_GetCoolingSetpointTemperature(priv->pcoHandle, &coolingSetPoint);
+                gint16 coolingSetPoint = 0;
+                if(CAMERATYPE_PCO_DIMAX_STD != priv->strCamType.wCamType)
+                    library_errors = PCO_GetCoolingSetpointTemperature(priv->pcoHandle, &coolingSetPoint);
                 g_value_set_int(value, coolingSetPoint);
             }
-            break;
+            break;*/
         case PROP_COOLING_POINT_MIN:
             g_value_set_int(value,priv->strDescription.sMinCoolSetDESC);
             break;
@@ -636,6 +680,26 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
             break;
         case PROP_COOLING_POINT_DEFAULT:
             g_value_set_int(value,priv->strDescription.sDefaultCoolSetDESC);
+            break;
+        case PROP_TIMESTAMP_MODE:
+            {
+                guint16 timestamp_mode;
+                library_errors = PCO_GetTimestampMode (priv->pcoHandle, &timestamp_mode);
+                switch(timestamp_mode) {
+                    case TIMESTAMP_MODE_OFF:
+                        g_value_set_enum (value, UCA_PCO_CAMERA_TIMESTAMP_NONE);
+                        break;
+                    case TIMESTAMP_MODE_BINARY:
+                        g_value_set_enum (value, UCA_PCO_CAMERA_TIMESTAMP_BINARY);
+                        break;
+                    case TIMESTAMP_MODE_BINARYANDASCII:
+                        g_value_set_enum (value, UCA_PCO_CAMERA_TIMESTAMP_BINARYANDASCII);
+                        break;
+                    case TIMESTAMP_MODE_ASCII:
+                        g_value_set_enum (value, UCA_PCO_CAMERA_TIMESTAMP_ASCII);
+                        break;
+                }
+            }
             break;
         // Generic UCA Properties
         case PROP_SENSOR_WIDTH:
@@ -700,16 +764,17 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
                     g_value_set_uint(value, 16);
                     break;
                 case CAMERATYPE_PCO_DIMAX_STD:
-                    g_value_set_uint(value, 12);
+                    g_value_set_uint(value, 16); // Why do we get image with bit depth of 16 bit ?
                     break;
             }
             break;
         case PROP_EXPOSURE_TIME:
         {
-            guint32 delay, exposure;
-            short delay_time_base, exposure_time_base;
-            library_errors = PCO_GetDelayExposureTime(priv->pcoHandle, &delay, &exposure, &delay_time_base, &exposure_time_base);
-            g_value_set_double(value, map_timebase(exposure_time_base) * exposure);
+            // Works for dimax and edge only
+            guint16 framerate_status;
+            guint32 framerate, framerate_exposure;
+            library_errors = PCO_GetFrameRate(priv->pcoHandle, &framerate_status, &framerate, &framerate_exposure);
+            g_value_set_double(value, framerate_exposure / 1000. / 1000. / 1000.);
         }
             break;
         case PROP_FRAMES_PER_SECOND:
@@ -718,7 +783,7 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
             guint16 framerate_status;
             guint32 framerate, framerate_exposure;
             library_errors = PCO_GetFrameRate(priv->pcoHandle, &framerate_status, &framerate, &framerate_exposure);
-            g_value_set_double(value, framerate / 1000); //mHz to Hz
+            g_value_set_double(value, framerate / 1000.); //mHz to Hz
         }
             break;
         case PROP_HAS_STREAMING:
@@ -799,9 +864,7 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
     if(library_errors)
     {
         PCO_GetErrorText(library_errors, error_text, ERROR_TEXT_BUFFER_SIZE);
-        g_set_error (&priv->construct_error,
-                     UCA_PCOWIN_CAMERA_ERROR, UCA_PCOWIN_CAMERA_ERROR_GETTER,
-                     "Failed to set property %s. Here's error code 0x%X for enquiring minds.\nSDK Error Text: %s", pco_properties[property_id]->name, library_errors, error_text);
+        g_warning ("Failed to set property %s. Here's error code 0x%X for enquiring minds.\nSDK Error Text: %s", pco_properties[property_id]->name, library_errors, error_text);
     }
 }
 
@@ -915,11 +978,11 @@ uca_pcowin_camera_class_init(UcaPcowinCameraClass *klass)
             pco_properties[PROP_SENSOR_PIXELRATE],
             G_PARAM_READABLE);
 
-    pco_properties[PROP_OFFSET_MODE] =
+    /*pco_properties[PROP_OFFSET_MODE] =
         g_param_spec_boolean("offset-mode",
             "Use offset mode",
             "Use offset mode",
-            FALSE, G_PARAM_READWRITE);
+            FALSE, G_PARAM_READWRITE);*/
             
     pco_properties[PROP_RECORD_MODE] =
         g_param_spec_enum("record-mode",
@@ -942,11 +1005,11 @@ uca_pcowin_camera_class_init(UcaPcowinCameraClass *klass)
             UCA_TYPE_PCO_CAMERA_ACQUIRE_MODE, UCA_PCO_CAMERA_ACQUIRE_MODE_AUTO,
             G_PARAM_READWRITE);
     
-    pco_properties[PROP_COOLING_POINT] =
+    /*pco_properties[PROP_COOLING_POINT] =
         g_param_spec_int("cooling-point",
             "Cooling point of the camera",
             "Cooling point of the camera in degree celsius",
-            0, 10, 5, G_PARAM_READWRITE);
+            0, 10, 5, G_PARAM_READWRITE);*/
 
     pco_properties[PROP_COOLING_POINT_MIN] =
         g_param_spec_int("cooling-point-min",
@@ -972,6 +1035,13 @@ uca_pcowin_camera_class_init(UcaPcowinCameraClass *klass)
             "Camera version given as `serial number, hardware major.minor, firmware major.minor'",
             NULL,
             G_PARAM_READABLE);
+
+    pco_properties[PROP_TIMESTAMP_MODE] =
+        g_param_spec_enum("timestamp-mode",
+            "Timestamp mode",
+            "Timestamp mode",
+            UCA_TYPE_PCO_CAMERA_TIMESTAMP, UCA_PCO_CAMERA_TIMESTAMP_BINARYANDASCII,
+            G_PARAM_READWRITE);
     
     for (guint id = N_BASE_PROPERTIES; id < N_PROPERTIES; id++)
         g_object_class_install_property(gobject_class, id, pco_properties[id]);
@@ -1036,6 +1106,7 @@ setupsdk_and_opencamera (UcaPcowinCameraPrivate *priv, UcaPcowinCamera *camera)
     error = PCO_OpenCamera(&priv->pcoHandle, 0);
     if(0 == error)
     {
+        //PCO_ResetSettingsToDefault(priv->pcoHandle);
         // @ToDo. Do error checking for the following functions. Remove unnecessary calls
         PCO_GetGeneral (priv->pcoHandle, &priv->strGeneral);
         PCO_GetCameraType (priv->pcoHandle, &priv->strCamType);
