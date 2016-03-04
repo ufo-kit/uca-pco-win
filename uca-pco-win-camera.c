@@ -213,12 +213,6 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
     library_errors = PCO_SetROI(priv->pcoHandle, roi[0], roi[1], roi[2], roi[3]);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
 
-    // Trigger mode is auto in camera default settings
-
-    // Recorder sub mode is not in uca-pco. Ask
-    library_errors = PCO_SetRecorderSubmode(priv->pcoHandle, 1);
-    CHECK_FOR_PCO_SDK_ERROR(library_errors);
-
     library_errors = PCO_ArmCamera(priv->pcoHandle);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
 
@@ -280,6 +274,7 @@ uca_pcowin_camera_start_readout(UcaCamera *camera, GError **error)
     g_return_if_fail(UCA_IS_PCOWIN_CAMERA(camera));
     priv=UCA_PCOWIN_CAMERA_GET_PRIVATE(camera);
 
+    PCO_GetNumberOfImagesInSegment(priv->pcoHandle, priv->active_ram_segment, &priv->numberof_recorded_images, &priv->camram_max_images);
     priv->current_image = 1;
 }
 
@@ -347,8 +342,10 @@ uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
     g_object_get (G_OBJECT (camera), "is-readout", &is_readout, NULL);
     if(is_readout)
     {
-        // This condition affects by terminating infinite while in camera control GUI or does it ;)
-        if(priv->current_image == priv->numberof_recorded_images)
+        /**
+            Just to make sure index of the image to read is less than the number of recorded images available in ram
+        **/
+        if(priv->current_image > priv->numberof_recorded_images)
             return NULL;
 
         image_index_to_transfer = priv->current_image;
@@ -877,6 +874,12 @@ uca_pcowin_camera_finalize(GObject *object)
     if(priv->possible_pixelrates)
         g_value_array_free(priv->possible_pixelrates);
     g_clear_error (&priv->construct_error);
+
+    /** 
+        Buffers are allocated during start_recording. So, should be freed at the end
+        @ToDo. If there are any previous buffers (when the camera acquires multiple times)
+        Then, only the last buffer is cleared. Though the SDK handles freeing of buffer. It logs this behaviour as an error.
+    **/
     PCO_FreeBuffer (priv->pcoHandle, priv->buffer_number);
 
     PCO_CloseCamera (priv->pcoHandle);
@@ -1132,6 +1135,7 @@ setupsdk_and_opencamera (UcaPcowinCameraPrivate *priv, UcaPcowinCamera *camera)
         PCO_GetBinning(priv->pcoHandle, &priv->horizontal_binning, &priv->vertical_binning);
 
         PCO_GetActiveRamSegment(priv->pcoHandle, &priv->active_ram_segment);
+        PCO_ClearRamSegment(priv->pcoHandle);
     }
     return error;
 }
