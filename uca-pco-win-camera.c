@@ -136,6 +136,7 @@ struct _UcaPcowinCameraPrivate {
     guint16 x_act, y_act;
     guint16 horizontal_binning, vertical_binning;
     GValueArray *possible_pixelrates;
+    guint32 pixel_rate;
 
     // With buff number = -1 and bufferPointer set to 0. SDK allocated a buffer for us
     gint16 buffer_number; 
@@ -180,6 +181,8 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
                   "sensor-extended", &use_extended_sensor_format,
                   "transfer-asynchronously", &transfer_async,
                   NULL);
+
+    PCO_ClearRamSegment(priv->pcoHandle);
 
     if(use_extended_sensor_format)
     {
@@ -263,6 +266,8 @@ uca_pcowin_camera_stop_recording(UcaCamera *camera, GError **error)
     library_errors = PCO_SetRecordingState(priv->pcoHandle, 0x0000);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
 
+    library_errors = PCO_GetPixelRate(priv->pcoHandle, &priv->pixel_rate);
+
     /*guint32 status, warnus, errnus;
     library_errors = PCO_GetCameraHealthStatus(priv->pcoHandle, &warnus, &errnus, &status);*/
 }
@@ -310,12 +315,6 @@ uca_pcowin_camera_trigger (UcaCamera *camera, GError **error)
     }
 }
 
-static void
-adjust_buffer_size (UcaPcowinCameraPrivate *priv)
-{
-
-}
-
 static gboolean
 uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
 {
@@ -333,25 +332,29 @@ uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
     Except event handeling is not required.
     Fn returns only when the image is transferred to memory (5 sec timeout)
     0,0 transfers most recent image. 1,1 could be used to transfer the first captured image ?
-    firstImage and LastImage of the segment can be used to bulk read images from camRAM. 
+    firstImage and LastImage of the segment can be used to bulk read images from camRAM. - This is not possible for dimax. Though mentioned in the SDK, it doesn't work as advertised
     Note. Make sure buffersize of appropriate buffernumber is sufficient enough when transferring multiple images.
     */
-    guint32 pixel_rate;
-    PCO_GetPixelRate(priv->pcoHandle, &pixel_rate);
-    // "is_readout" is set in uca_camera_start_readout.
+    // "is_readout" is set in uca_camera_start_readout and unset in uca_camera_stop_readout.
     g_object_get (G_OBJECT (camera), "is-readout", &is_readout, NULL);
     if(is_readout)
     {
         /**
-            Just to make sure index of the image to read is less than the number of recorded images available in ram
+            Error set to convey that the readout index has reached last available frame on camRAM
         **/
         if(priv->current_image > priv->numberof_recorded_images)
-            return NULL;
+        {
+            // Should this is be used ?
+            g_set_error (error, UCA_CAMERA_ERROR,
+                     UCA_CAMERA_ERROR_END_OF_STREAM,
+                     "End of camRAM readout");
+            return FALSE;
+        }
 
         image_index_to_transfer = priv->current_image;
         priv->current_image ++;
     }
-    library_errors = PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, image_index_to_transfer, image_index_to_transfer, priv->buffer_number, priv->x_act, priv->y_act, pixel_rate);
+    library_errors = PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, image_index_to_transfer, image_index_to_transfer, priv->buffer_number, priv->x_act, priv->y_act, priv->pixel_rate);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
     memcpy((gchar *) data, (gchar *) priv->buffer_pointer, priv->buffer_size);
 
@@ -361,7 +364,19 @@ uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
 static gboolean
 uca_pcowin_camera_readout (UcaCamera *camera, gpointer data, guint index, GError **error)
 {
+    UcaPcowinCameraPrivate *priv;
+    int library_errors;
 
+    g_return_if_fail(UCA_IS_PCOWIN_CAMERA(camera));
+
+    priv = UCA_PCOWIN_CAMERA_GET_PRIVATE(camera);
+
+    library_errors = PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, index, index, priv->buffer_number, priv->x_act, priv->y_act, priv->pixel_rate);
+    CHECK_FOR_PCO_SDK_ERROR(library_errors);
+
+    memcpy((gchar *) data, (gchar *) priv->buffer_pointer, priv->buffer_size);
+
+    return TRUE;
 }
 
 static void
@@ -1135,7 +1150,6 @@ setupsdk_and_opencamera (UcaPcowinCameraPrivate *priv, UcaPcowinCamera *camera)
         PCO_GetBinning(priv->pcoHandle, &priv->horizontal_binning, &priv->vertical_binning);
 
         PCO_GetActiveRamSegment(priv->pcoHandle, &priv->active_ram_segment);
-        PCO_ClearRamSegment(priv->pcoHandle);
     }
     return error;
 }
