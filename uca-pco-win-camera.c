@@ -139,11 +139,14 @@ struct _UcaPcowinCameraPrivate {
     guint32 pixel_rate;
 
     // With buff number = -1 and bufferPointer set to 0. SDK allocated a buffer for us
-    gint16 buffer_number; 
-    guint16 *buffer_pointer;
+    gint16 buffer_number_0, buffer_number_1; 
+    guint16 *buffer_pointer_0, *buffer_pointer_1;
     guint32 buffer_size;
     guint16 active_ram_segment;
     guint32 numberof_recorded_images, camram_max_images, current_image;
+
+    gboolean readout_completed;
+    gpointer readout_pointer;
 
     UcaCameraTriggerSource trigger_source;
 };
@@ -233,12 +236,17 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
     priv->y_act = y_act;
 
     // Allocation of buffer. Driver allocates a number if buffer number is set to -1
-    priv->buffer_number = -1; 
+    priv->buffer_number_0 = -1; 
+    priv->buffer_number_1 = -1; 
     priv->buffer_size = x_act * y_act * 2;
-    priv->buffer_pointer = NULL;
+    priv->buffer_pointer_0 = NULL;
+    priv->buffer_pointer_1 = NULL;
     priv->handleEvent = NULL;
 
-    library_errors = PCO_AllocateBuffer(priv->pcoHandle, &priv->buffer_number, priv->buffer_size, &priv->buffer_pointer, &priv->handleEvent);
+    library_errors = PCO_AllocateBuffer(priv->pcoHandle, &priv->buffer_number_0, priv->buffer_size, &priv->buffer_pointer_0, &priv->handleEvent);
+    CHECK_FOR_PCO_SDK_ERROR(library_errors);
+
+    library_errors = PCO_AllocateBuffer(priv->pcoHandle, &priv->buffer_number_1, priv->buffer_size, &priv->buffer_pointer_1, &priv->handleEvent);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
 
     library_errors = PCO_CamLinkSetImageParameters(priv->pcoHandle, x_act, y_act);
@@ -315,6 +323,44 @@ uca_pcowin_camera_trigger (UcaCamera *camera, GError **error)
     }
 }
 
+static void
+grab_with_buffer_0(UcaPcowinCameraPrivate *priv)
+{
+    guint index = 1;
+    guint count = 0;
+    int library_errors;
+
+    do {
+        library_errors = PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, index, index, priv->buffer_number_0, priv->x_act, priv->y_act, priv->pixel_rate);
+
+        memcpy((gchar *) (priv->readout_pointer+(index-1)*priv->buffer_size), (gchar *) priv->buffer_pointer_0, priv->buffer_size);
+
+        count++;
+        index += 2;
+    }while(index <= priv->numberof_recorded_images);
+
+    g_thread_exit(count);
+}
+
+static void
+grab_with_buffer_1(UcaPcowinCameraPrivate *priv)
+{
+    guint index = 2;
+    guint count = 0;
+    int library_errors;
+
+    do {
+        library_errors = PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, index, index, priv->buffer_number_1, priv->x_act, priv->y_act, priv->pixel_rate);
+
+        memcpy((gchar *) (priv->readout_pointer+(index-1)*priv->buffer_size), (gchar *) priv->buffer_pointer_1, priv->buffer_size);
+
+        count++;
+        index +=2;
+    }while(index <= priv->numberof_recorded_images);
+
+    g_thread_exit(count);
+}
+
 static gboolean
 uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
 {
@@ -322,6 +368,8 @@ uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
     UcaPcowinCameraPrivate *priv;
     gboolean is_readout;
     guint32 image_index_to_transfer = 0;
+    GThread *thread_0, *thread_1;
+    guint thread_0_count, thread_1_count;
 
     g_return_if_fail(UCA_IS_PCOWIN_CAMERA(camera));
 
@@ -337,8 +385,28 @@ uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
     */
     // "is_readout" is set in uca_camera_start_readout and unset in uca_camera_stop_readout.
     g_object_get (G_OBJECT (camera), "is-readout", &is_readout, NULL);
-    if(is_readout)
-    {
+    if(is_readout && !priv->readout_completed) {
+        
+        /* HeadsUp. This might crash the application I guess. camRAM is 36GB so max allocation required would be 36 GB */
+        priv->readout_pointer = g_malloc0(priv->numberof_recorded_images * priv->buffer_size); // no.of images * size of each image
+
+        if((thread_0 = g_thread_new ("buffer-0", grab_with_buffer_0, priv)) == NULL) {
+            g_warning("Failed to create a new thread");
+        }
+        if((thread_1 = g_thread_new ("buffer-1", grab_with_buffer_1, priv)) == NULL) {
+            g_warning("Failed to create a new thread");
+        }
+
+        thread_0_count = g_thread_join(thread_0);
+        thread_1_count = g_thread_join(thread_1);
+
+        if(thread_0_count + thread_1_count != priv->numberof_recorded_images) {
+            g_warning("Something is not right with two threads getting the images. Summed up image count = %d", thread_0_count+thread_1_count );
+        }
+        else
+            priv->readout_completed = TRUE;
+    }
+    if(is_readout && priv->readout_completed) {
         /**
             Error set to convey that the readout index has reached last available frame on camRAM
         **/
@@ -351,13 +419,18 @@ uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
             return FALSE;
         }
 
-        image_index_to_transfer = priv->current_image;
+        // image_index_to_transfer = priv->current_image;
         priv->current_image ++;
-    }
-    library_errors = PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, image_index_to_transfer, image_index_to_transfer, priv->buffer_number, priv->x_act, priv->y_act, priv->pixel_rate);
-    CHECK_FOR_PCO_SDK_ERROR(library_errors);
-    memcpy((gchar *) data, (gchar *) priv->buffer_pointer, priv->buffer_size);
 
+        memcpy ((gchar *)priv->readout_pointer+(priv->current_image-1)*priv->buffer_size, (gchar *) priv->buffer_pointer_0, priv->buffer_size);
+
+        //memcpy again here from new buffer to data
+    }
+    else {
+        library_errors = PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, image_index_to_transfer, image_index_to_transfer, priv->buffer_number_0, priv->x_act, priv->y_act, priv->pixel_rate);
+        CHECK_FOR_PCO_SDK_ERROR(library_errors);
+        memcpy((gchar *) data, (gchar *) priv->buffer_pointer_0, priv->buffer_size);
+    }
     return TRUE;
 }
 
@@ -371,10 +444,10 @@ uca_pcowin_camera_readout (UcaCamera *camera, gpointer data, guint index, GError
 
     priv = UCA_PCOWIN_CAMERA_GET_PRIVATE(camera);
 
-    library_errors = PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, index, index, priv->buffer_number, priv->x_act, priv->y_act, priv->pixel_rate);
+    library_errors = PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, index, index, priv->buffer_number_0, priv->x_act, priv->y_act, priv->pixel_rate);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
 
-    memcpy((gchar *) data, (gchar *) priv->buffer_pointer, priv->buffer_size);
+    memcpy((gchar *) data, (gchar *) priv->buffer_pointer_0, priv->buffer_size);
 
     return TRUE;
 }
@@ -895,7 +968,8 @@ uca_pcowin_camera_finalize(GObject *object)
         @ToDo. If there are any previous buffers (when the camera acquires multiple times)
         Then, only the last buffer is cleared. Though the SDK handles freeing of buffer. It logs this behaviour as an error.
     **/
-    PCO_FreeBuffer (priv->pcoHandle, priv->buffer_number);
+    PCO_FreeBuffer (priv->pcoHandle, priv->buffer_number_0);
+    PCO_FreeBuffer (priv->pcoHandle, priv->buffer_number_1);
 
     PCO_CloseCamera (priv->pcoHandle);
 
