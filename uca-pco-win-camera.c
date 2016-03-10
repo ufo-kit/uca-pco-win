@@ -232,6 +232,9 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
     priv->x_act = x_act;
     priv->y_act = y_act;
 
+    library_errors = PCO_GetPixelRate(priv->pcoHandle, &priv->pixel_rate);
+    CHECK_FOR_PCO_SDK_ERROR(library_errors);
+
     // Allocation of buffer. Driver allocates a number if buffer number is set to -1
     priv->buffer_number = -1; 
     priv->buffer_size = x_act * y_act * 2;
@@ -265,8 +268,6 @@ uca_pcowin_camera_stop_recording(UcaCamera *camera, GError **error)
 
     library_errors = PCO_SetRecordingState(priv->pcoHandle, 0x0000);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
-
-    library_errors = PCO_GetPixelRate(priv->pcoHandle, &priv->pixel_rate);
 
     /*guint32 status, warnus, errnus;
     library_errors = PCO_GetCameraHealthStatus(priv->pcoHandle, &warnus, &errnus, &status);*/
