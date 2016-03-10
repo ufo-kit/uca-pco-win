@@ -62,12 +62,12 @@ enum {
     //PROP_SENSOR_MAX_ADCS,
     //PROP_HAS_DOUBLE_IMAGE_MODE,
     //PROP_DOUBLE_IMAGE_MODE,
-    //PROP_OFFSET_MODE,
+    PROP_OFFSET_MODE,
     PROP_RECORD_MODE,
     PROP_STORAGE_MODE,
     PROP_ACQUIRE_MODE,
     //PROP_FAST_SCAN,
-    //PROP_COOLING_POINT,
+    PROP_COOLING_POINT,
     PROP_COOLING_POINT_MIN,
     PROP_COOLING_POINT_MAX,
     PROP_COOLING_POINT_DEFAULT,
@@ -158,6 +158,14 @@ map_timebase(short timebase)
         default:
             return 1e-3;
     }
+}
+
+static gboolean
+is_camera_pcoedge (UcaPcowinCameraPrivate *priv)
+{
+    guint16 camera_type = priv->strCamType.wCamType;
+    camera_type &= 0xFF00;
+    return camera_type == CAMERATYPE_PCO_EDGE ? TRUE : FALSE;
 }
 
 static void
@@ -451,10 +459,10 @@ uca_pcowin_camera_set_property (GObject *object, guint property_id, const GValue
                     g_warning("Pixelrate is not set. %d Hz is not in the range of possible pixelrates. Check \'sensor-pixelrates\' property",pixelrate);
             }
             break;
-        /*case PROP_OFFSET_MODE:
+        case PROP_OFFSET_MODE:
             {
-                // PCO_SetOffsetMode is available only for pco.1400, pco.pixelfly.usb, pco.1300. @ToDo implement proper checks
-                if(CAMERATYPE_PCO_DIMAX_STD != priv->strCamType.wCamType)
+                // PCO_SetOffsetMode is available only for pco.1400, pco.pixelfly.usb, pco.1300.
+                if(CAMERATYPE_PCO_DIMAX_STD == priv->strCamType.wCamType)
                     library_errors = PCO_SetOffsetMode(priv->pcoHandle, g_value_get_boolean(value) ? 1 : 0);    
             }
             break;
@@ -465,10 +473,13 @@ uca_pcowin_camera_set_property (GObject *object, guint property_id, const GValue
                 if(CAMERATYPE_PCO_DIMAX_STD != priv->strCamType.wCamType)
                 {
                     temperature = (gint16)g_value_get_int(value);
-                    library_errors = PCO_SetCoolingSetpointTemperature(priv->pcoHandle, temperature);
+                    if(temperature < priv->strDescription.sMinCoolSetDESC || temperature > priv->strDescription.sMaxCoolSetDESC)
+                        g_warning("Temperature beyond available cooling range");
+                    else
+                        library_errors = PCO_SetCoolingSetpointTemperature(priv->pcoHandle, temperature);
                 }
             }
-            break;*/
+            break;
         case PROP_RECORD_MODE:
             {
                 UcaPcoCameraRecordMode subMode = (UcaPcoCameraRecordMode) g_value_get_enum(value);
@@ -602,16 +613,14 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
             g_value_set_uint(value, pixelrate);
         }
             break;
-        /*case PROP_OFFSET_MODE:
+        case PROP_OFFSET_MODE:
             {
                 guint16 offsetRegulation = FALSE;
-                if(CAMERATYPE_PCO_DIMAX_STD != priv->strCamType.wCamType || CAMERATYPE_PCO_EDGE != priv->strCamType.wCamType)
-                {
+                if(CAMERATYPE_PCO_DIMAX_STD == priv->strCamType.wCamType)
                     library_errors = PCO_GetOffsetMode(priv->pcoHandle, &offsetRegulation);    
-                }
                 g_value_set_boolean(value, offsetRegulation ? TRUE: FALSE);
             }
-            break;*/
+            break;
         case PROP_RECORD_MODE:
             {
                 // Only available if the storage mode is set to recorder
@@ -661,14 +670,14 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
                 }
             }
             break;
-        /*case PROP_COOLING_POINT:
+        case PROP_COOLING_POINT:
             {
                 gint16 coolingSetPoint = 0;
                 if(CAMERATYPE_PCO_DIMAX_STD != priv->strCamType.wCamType)
                     library_errors = PCO_GetCoolingSetpointTemperature(priv->pcoHandle, &coolingSetPoint);
                 g_value_set_int(value, coolingSetPoint);
             }
-            break;*/
+            break;
         case PROP_COOLING_POINT_MIN:
             g_value_set_int(value,priv->strDescription.sMinCoolSetDESC);
             break;
@@ -794,10 +803,13 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
 
         case PROP_RECORDED_FRAMES:
         {
-            // This number is dynamic if the camera is running in recorder mode or in FIFO buffer mode. Result is accurate when recording is stopped
-            guint32 valid_images, max_images;
-            library_errors = PCO_GetNumberOfImagesInSegment(priv->pcoHandle, priv->active_ram_segment, &valid_images, &max_images);
-            g_value_set_uint(value, valid_images);
+            if(!is_camera_pcoedge(priv))
+            {
+                // This number is dynamic if the camera is running in recorder mode or in FIFO buffer mode. Result is accurate when recording is stopped
+                guint32 valid_images, max_images;
+                library_errors = PCO_GetNumberOfImagesInSegment(priv->pcoHandle, priv->active_ram_segment, &valid_images, &max_images);
+                g_value_set_uint(value, valid_images);
+            }
         }
             break;      
         case PROP_TRIGGER_SOURCE:
@@ -981,11 +993,11 @@ uca_pcowin_camera_class_init(UcaPcowinCameraClass *klass)
             pco_properties[PROP_SENSOR_PIXELRATE],
             G_PARAM_READABLE);
 
-    /*pco_properties[PROP_OFFSET_MODE] =
+    pco_properties[PROP_OFFSET_MODE] =
         g_param_spec_boolean("offset-mode",
             "Use offset mode",
             "Use offset mode",
-            FALSE, G_PARAM_READWRITE);*/
+            FALSE, G_PARAM_READWRITE);
             
     pco_properties[PROP_RECORD_MODE] =
         g_param_spec_enum("record-mode",
@@ -1008,11 +1020,11 @@ uca_pcowin_camera_class_init(UcaPcowinCameraClass *klass)
             UCA_TYPE_PCO_CAMERA_ACQUIRE_MODE, UCA_PCO_CAMERA_ACQUIRE_MODE_AUTO,
             G_PARAM_READWRITE);
     
-    /*pco_properties[PROP_COOLING_POINT] =
+    pco_properties[PROP_COOLING_POINT] =
         g_param_spec_int("cooling-point",
             "Cooling point of the camera",
             "Cooling point of the camera in degree celsius",
-            0, 10, 5, G_PARAM_READWRITE);*/
+            0, 10, 5, G_PARAM_READWRITE);
 
     pco_properties[PROP_COOLING_POINT_MIN] =
         g_param_spec_int("cooling-point-min",
