@@ -18,6 +18,7 @@ Notes:
 #include <PCO_errt.h>
 #include "uca-pco-win-camera.h"
 #include "uca-pco-enums.h"
+#include <windows.h>
 
 #define TRIGGER_MODE_AUTOTRIGGER        0x0000
 #define TRIGGER_MODE_SOFTWARETRIGGER    0x0001
@@ -117,7 +118,7 @@ static char error_text[ERROR_TEXT_BUFFER_SIZE];
 struct _UcaPcowinCameraPrivate {
     
     HANDLE pcoHandle;
-    HANDLE handleEvent;
+    HANDLE handle_event_0, handle_event_1;
     
     GError *construct_error;
     
@@ -138,9 +139,9 @@ struct _UcaPcowinCameraPrivate {
     GValueArray *possible_pixelrates;
     guint32 pixel_rate;
 
-    // With buff number = -1 and bufferPointer set to 0. SDK allocated a buffer for us
-    gint16 buffer_number; 
-    guint16 *buffer_pointer;
+    // With buff number = -1 and buffer pointer set to 0. SDK allocates a buffer for us
+    gint16 buffer_number_0, buffer_number_1; 
+    guint16 *buffer_pointer_0, *buffer_pointer_1;
     guint32 buffer_size;
     guint16 active_ram_segment;
     guint32 numberof_recorded_images, camram_max_images, current_image;
@@ -190,7 +191,8 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
                   "transfer-asynchronously", &transfer_async,
                   NULL);
 
-    PCO_ClearRamSegment(priv->pcoHandle);
+    if(!is_camera_pcoedge(priv))
+        PCO_ClearRamSegment(priv->pcoHandle);
 
     if(use_extended_sensor_format)
     {
@@ -244,15 +246,24 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
 
     // Allocation of buffer. Driver allocates a number if buffer number is set to -1
-    priv->buffer_number = -1; 
+    priv->buffer_number_0 = -1;
+    priv->buffer_number_1 = -1;
+    priv->buffer_pointer_0 = NULL;
+    priv->buffer_pointer_1 = NULL;
+    priv->handle_event_0 = NULL;
+    priv->handle_event_1 = NULL;
     priv->buffer_size = x_act * y_act * 2;
-    priv->buffer_pointer = NULL;
-    priv->handleEvent = NULL;
+    
+    library_errors = PCO_AllocateBuffer(priv->pcoHandle, &priv->buffer_number_0, priv->buffer_size, &priv->buffer_pointer_0, &priv->handle_event_0);
+    CHECK_FOR_PCO_SDK_ERROR(library_errors);
 
-    library_errors = PCO_AllocateBuffer(priv->pcoHandle, &priv->buffer_number, priv->buffer_size, &priv->buffer_pointer, &priv->handleEvent);
+    library_errors = PCO_AllocateBuffer(priv->pcoHandle, &priv->buffer_number_1, priv->buffer_size, &priv->buffer_pointer_1, &priv->handle_event_1);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
 
     library_errors = PCO_CamLinkSetImageParameters(priv->pcoHandle, x_act, y_act);
+    CHECK_FOR_PCO_SDK_ERROR(library_errors);
+
+    library_errors = PCO_AddBufferEx(priv->pcoHandle, 0, 0, priv->buffer_number_0, priv->x_act, priv->y_act, priv->pixel_rate);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
 
     library_errors = PCO_SetRecordingState(priv->pcoHandle, 0x0001);
@@ -331,6 +342,7 @@ uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
     UcaPcowinCameraPrivate *priv;
     gboolean is_readout;
     guint32 image_index_to_transfer = 0;
+    int result_event;
 
     g_return_if_fail(UCA_IS_PCOWIN_CAMERA(camera));
 
@@ -362,10 +374,31 @@ uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
 
         image_index_to_transfer = priv->current_image;
         priv->current_image ++;
+
+        library_errors = PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, image_index_to_transfer, image_index_to_transfer, priv->buffer_number_0, priv->x_act, priv->y_act, priv->pixel_rate);
+        CHECK_FOR_PCO_SDK_ERROR(library_errors);
+        memcpy((gchar *) data, (gchar *) priv->buffer_pointer_0, priv->buffer_size);
     }
-    library_errors = PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, image_index_to_transfer, image_index_to_transfer, priv->buffer_number, priv->x_act, priv->y_act, priv->pixel_rate);
-    CHECK_FOR_PCO_SDK_ERROR(library_errors);
-    memcpy((gchar *) data, (gchar *) priv->buffer_pointer, priv->buffer_size);
+    else
+    {
+        /*
+        Headsup, this is Windows API.
+        Implementing grab using WaitForSingleObject and AddBuffer is much much faster than GetImageEx
+        Waits for buffer_0 event. Timeout set to 1000 msec
+        */
+        result_event = WaitForSingleObject (priv->handle_event_0, 1000);
+        if(result_event == WAIT_OBJECT_0)
+        {
+            memcpy((gchar *) data, (gchar *) priv->buffer_pointer_0, priv->buffer_size);
+
+            library_errors = PCO_AddBufferEx(priv->pcoHandle, 0, 0, priv->buffer_number_0, priv->x_act, priv->y_act, priv->pixel_rate);
+            CHECK_FOR_PCO_SDK_ERROR(library_errors);
+        }
+        else
+        {
+            g_warning("WaitForSingleObject Failed. Return Value = %X",result_event);
+        }
+    }
 
     return TRUE;
 }
@@ -380,10 +413,10 @@ uca_pcowin_camera_readout (UcaCamera *camera, gpointer data, guint index, GError
 
     priv = UCA_PCOWIN_CAMERA_GET_PRIVATE(camera);
 
-    library_errors = PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, index, index, priv->buffer_number, priv->x_act, priv->y_act, priv->pixel_rate);
+    library_errors = PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, index, index, priv->buffer_number_0, priv->x_act, priv->y_act, priv->pixel_rate);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
 
-    memcpy((gchar *) data, (gchar *) priv->buffer_pointer, priv->buffer_size);
+    memcpy((gchar *) data, (gchar *) priv->buffer_pointer_0, priv->buffer_size);
 
     return TRUE;
 }
@@ -908,7 +941,8 @@ uca_pcowin_camera_finalize(GObject *object)
         @ToDo. If there are any previous buffers (when the camera acquires multiple times)
         Then, only the last buffer is cleared. Though the SDK handles freeing of buffer. It logs this behaviour as an error.
     **/
-    PCO_FreeBuffer (priv->pcoHandle, priv->buffer_number);
+    PCO_FreeBuffer (priv->pcoHandle, priv->buffer_number_0);
+    PCO_FreeBuffer (priv->pcoHandle, priv->buffer_number_1);
 
     PCO_CloseCamera (priv->pcoHandle);
 
