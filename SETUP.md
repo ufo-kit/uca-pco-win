@@ -40,3 +40,7 @@ Note: A package config file(libuca.pc) is generated when libuca is built and is 
 > `cmake -G "MSYS Makefiles" -D CMAKE_INSTALL_PREFIX="C:\uca" -D CMAKE_BUILD_TYPE=Debug ..`
 
 * make && make install
+
+## Executing
+
+`SC2_Cam.dll`, `sc2_cl_me4.dll` (from pco.sdk/bin64) and `fglib5.dll` (from SiliconSoftware Runtime 5.2.3) should be copied into the same directory as the plugin directory (which would be C:\uca\bin i.e `CMAKE_INSTALL_PREFIX`\bin)

@@ -136,7 +136,7 @@ struct _UcaPcowinCameraPrivate {
     guint16 x_act, y_act;
     guint16 horizontal_binning, vertical_binning;
     GValueArray *possible_pixelrates;
-    guint32 pixel_rate;
+    guint16 bit_per_pixel;
 
     // Two buffers defined for future enchancement purposes. Currently, only buffer_number_0 is used
     gint16 buffer_number_0, buffer_number_1; 
@@ -237,9 +237,6 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
     priv->x_act = x_act;
     priv->y_act = y_act;
 
-    library_errors = PCO_GetPixelRate(priv->pcoHandle, &priv->pixel_rate);
-    CHECK_FOR_PCO_SDK_ERROR(library_errors);
-
     // Allocation of buffer. Driver allocates a number if buffer number is set to -1
     priv->buffer_number_0 = -1;
     priv->buffer_number_1 = -1;
@@ -255,16 +252,14 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
     library_errors = PCO_AllocateBuffer(priv->pcoHandle, &priv->buffer_number_1, priv->buffer_size, &priv->buffer_pointer_1, &priv->handle_event_1);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
 
-    library_errors = PCO_CamLinkSetImageParameters(priv->pcoHandle, x_act, y_act);
-    CHECK_FOR_PCO_SDK_ERROR(library_errors);
-
-    library_errors = PCO_AddBufferEx(priv->pcoHandle, 0, 0, priv->buffer_number_0, priv->x_act, priv->y_act, priv->pixel_rate);
+    library_errors = PCO_CamLinkSetImageParameters(priv->pcoHandle, priv->x_act, priv->y_act);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
 
     library_errors = PCO_SetRecordingState(priv->pcoHandle, 0x0001);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
 
-
+    library_errors = PCO_AddBufferEx(priv->pcoHandle, 0, 0, priv->buffer_number_0, priv->x_act, priv->y_act, priv->bit_per_pixel);
+    CHECK_FOR_PCO_SDK_ERROR(library_errors);
 }
 
 static void
@@ -370,7 +365,7 @@ uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
         image_index_to_transfer = priv->current_image;
         priv->current_image ++;
 
-        library_errors = PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, image_index_to_transfer, image_index_to_transfer, priv->buffer_number_0, priv->x_act, priv->y_act, priv->pixel_rate);
+        library_errors = PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, image_index_to_transfer, image_index_to_transfer, priv->buffer_number_0, priv->x_act, priv->y_act, priv->bit_per_pixel);
         CHECK_FOR_PCO_SDK_ERROR(library_errors);
         memcpy((gchar *) data, (gchar *) priv->buffer_pointer_0, priv->buffer_size);
     }
@@ -386,7 +381,7 @@ uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
         {
             memcpy((gchar *) data, (gchar *) priv->buffer_pointer_0, priv->buffer_size);
 
-            library_errors = PCO_AddBufferEx(priv->pcoHandle, 0, 0, priv->buffer_number_0, priv->x_act, priv->y_act, priv->pixel_rate);
+            library_errors = PCO_AddBufferEx(priv->pcoHandle, 0, 0, priv->buffer_number_0, priv->x_act, priv->y_act, priv->bit_per_pixel);
             CHECK_FOR_PCO_SDK_ERROR(library_errors);
         }
         else
@@ -408,7 +403,7 @@ uca_pcowin_camera_readout (UcaCamera *camera, gpointer data, guint index, GError
 
     priv = UCA_PCOWIN_CAMERA_GET_PRIVATE(camera);
 
-    library_errors = PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, index, index, priv->buffer_number_0, priv->x_act, priv->y_act, priv->pixel_rate);
+    library_errors = PCO_GetImageEx(priv->pcoHandle, priv->active_ram_segment, index, index, priv->buffer_number_0, priv->x_act, priv->y_act, priv->bit_per_pixel);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
 
     memcpy((gchar *) data, (gchar *) priv->buffer_pointer_0, priv->buffer_size);
@@ -1335,6 +1330,7 @@ setupsdk_and_opencamera (UcaPcowinCameraPrivate *priv, UcaPcowinCamera *camera)
         priv->height = priv->strDescription.wMaxVertResStdDESC;
         priv->width_ex = priv->strDescription.wMaxHorzResExtDESC;
         priv->height_ex = priv->strDescription.wMaxVertResExtDESC;
+        priv->bit_per_pixel = priv->strDescription.wDynResDESC;
 
         library_errors = PCO_GetBinning(priv->pcoHandle, &priv->horizontal_binning, &priv->vertical_binning);
         CHECK_FOR_PCO_SDK_ERROR_DURING_SETUP(library_errors);
