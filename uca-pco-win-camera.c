@@ -1,4 +1,20 @@
 /**
+Copyright (C) 2016  Sai Sasidhar Maddali <sai.sasidhar92@gmail.com>
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public
+License as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+
 Notes:
     PCO SDK uses windows specific data types in its header files and documentation.
     This program has glib data types. For ex. for a pco library function that requires WORD, 
@@ -14,11 +30,13 @@ Notes:
 #include <minwindef.h>
 #include <sc2_SDKStructures.h>
 #include <sc2_defs.h>
+#include <SC2_SDKAddendum.h>
 #include <PCO_err.h>
 #include <PCO_errt.h>
+#include <windows.h>
+
 #include "uca-pco-win-camera.h"
 #include "uca-pco-enums.h"
-#include <windows.h>
 
 #define TRIGGER_MODE_AUTOTRIGGER        0x0000
 #define TRIGGER_MODE_SOFTWARETRIGGER    0x0001
@@ -128,6 +146,9 @@ struct _UcaPcowinCameraPrivate {
     
     PCO_CameraType strCamType;
     PCO_Description strDescription;
+    PCO_Storage strStorage;
+    PCO_General strGeneral;
+    PCO_Sensor strSensor;
 
     guint16 roi_x, roi_y;
     guint16 roi_width, roi_height;
@@ -162,11 +183,9 @@ map_timebase(short timebase)
 }
 
 static gboolean
-is_camera_pcoedge (UcaPcowinCameraPrivate *priv)
+check_camera_type (int camera_type, int type)
 {
-    guint16 camera_type = priv->strCamType.wCamType;
-    camera_type &= 0xFF00;
-    return camera_type == CAMERATYPE_PCO_EDGE ? TRUE : FALSE;
+    return camera_type == type;
 }
 
 static void
@@ -190,7 +209,8 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
                   "transfer-asynchronously", &transfer_async,
                   NULL);
 
-    if(!is_camera_pcoedge(priv))
+    // All camera's except pco.edge support camram
+    if(!check_camera_type(priv->strCamType.wCamType & 0xFF00, CAMERATYPE_PCO_EDGE))
         PCO_ClearRamSegment(priv->pcoHandle);
 
     if(use_extended_sensor_format)
@@ -255,11 +275,37 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
     library_errors = PCO_CamLinkSetImageParameters(priv->pcoHandle, priv->x_act, priv->y_act);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
 
-    library_errors = PCO_SetRecordingState(priv->pcoHandle, 0x0001);
-    CHECK_FOR_PCO_SDK_ERROR(library_errors);
+    /*
+        Synchronous grab is the only way to read images because pco.edge does not have internal memory. 
+        Therefore, in order to get the first image that was recorded by pco.edge PCO_AddBufferEx should 
+        be called before PCO_SetRecordingState(1). 
+        
+        However, this order of function calls causes an error when ROI is changed back to a larger region 
+        from previously set smaller region in pco.dimax camera. This error in SDK could be avoided by 
+        reordering these functions as seen in else block(Ref. commit b88dd75).
 
-    library_errors = PCO_AddBufferEx(priv->pcoHandle, 0, 0, priv->buffer_number_0, priv->x_act, priv->y_act, priv->bit_per_pixel);
-    CHECK_FOR_PCO_SDK_ERROR(library_errors);
+        This workaround was only tested for pco.edge and pco.dimax
+    */
+    if(check_camera_type(priv->strCamType.wCamType & 0xFF00, CAMERATYPE_PCO_EDGE))
+    {
+        library_errors = PCO_SetTransferParametersAuto(priv->pcoHandle, NULL, 0);
+        CHECK_FOR_PCO_SDK_ERROR(library_errors);
+
+        library_errors = PCO_AddBufferEx(priv->pcoHandle, 0, 0, priv->buffer_number_0, priv->x_act, priv->y_act, priv->bit_per_pixel);
+        CHECK_FOR_PCO_SDK_ERROR(library_errors);
+
+        library_errors = PCO_SetRecordingState(priv->pcoHandle, 0x0001);
+        CHECK_FOR_PCO_SDK_ERROR(library_errors);
+    }
+    else
+    {
+        library_errors = PCO_SetRecordingState(priv->pcoHandle, 0x0001);
+        CHECK_FOR_PCO_SDK_ERROR(library_errors);
+
+        library_errors = PCO_AddBufferEx(priv->pcoHandle, 0, 0, priv->buffer_number_0, priv->x_act, priv->y_act, priv->bit_per_pixel);
+        CHECK_FOR_PCO_SDK_ERROR(library_errors);
+    }
+    
 }
 
 static void
@@ -608,7 +654,7 @@ uca_pcowin_camera_set_property (GObject *object, guint property_id, const GValue
                 guint32 setup[2];
                 int timeouts[3] = {2000,3000,250}; // command, image, and channel timeout
 
-                if(is_camera_pcoedge(priv))
+                if(check_camera_type(priv->strCamType.wCamType & 0xFF00, CAMERATYPE_PCO_EDGE))
                 {
                     PCO_GetCameraSetup (priv->pcoHandle, &setup_type, &setup[0], &valid_setups);
                     setup[0] = g_value_get_boolean(value) ? PCO_EDGE_SETUP_GLOBAL_SHUTTER : PCO_EDGE_SETUP_ROLLING_SHUTTER;
@@ -812,7 +858,7 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
             {
                 guint16 setup_type, valid_setups = 2;
                 guint32 setup[2];
-                if(is_camera_pcoedge (priv))
+                if(check_camera_type (priv->strCamType.wCamType & 0xFF00, CAMERATYPE_PCO_EDGE))
                 {
                     PCO_GetCameraSetup(priv->pcoHandle, &setup_type, &setup[0], &valid_setups);
                     g_value_set_boolean(value, setup[0] == PCO_EDGE_SETUP_GLOBAL_SHUTTER ? TRUE: FALSE);
@@ -958,7 +1004,7 @@ uca_pcowin_camera_get_property(GObject *object, guint property_id, GValue *value
 
         case PROP_RECORDED_FRAMES:
         {
-            if(!is_camera_pcoedge(priv))
+            if(!check_camera_type(priv->strCamType.wCamType & 0xFF00, CAMERATYPE_PCO_EDGE))
             {
                 // This number is dynamic if the camera is running in recorder mode or in FIFO buffer mode. Result is accurate when recording is stopped
                 guint32 valid_images, max_images;
@@ -1302,18 +1348,33 @@ setupsdk_and_opencamera (UcaPcowinCameraPrivate *priv, UcaPcowinCamera *camera)
     guint16 roi[4];
     int library_errors;
     
+    priv->strGeneral.wSize = sizeof (priv->strGeneral);
+    priv->strGeneral.strCamType.wSize = sizeof (priv->strGeneral.strCamType);
     priv->strCamType.wSize = sizeof (priv->strCamType);
+    priv->strSensor.wSize = sizeof (priv->strSensor);
+    priv->strSensor.strDescription.wSize = sizeof (priv->strSensor.strDescription);
+    priv->strSensor.strDescription2.wSize = sizeof (priv->strSensor.strDescription2);
     priv->strDescription.wSize = sizeof (priv->strDescription);
+    priv->strStorage.wSize = sizeof (priv->strStorage);
     
     // 0 - Success, ~0 - Error or warning
     error = PCO_OpenCamera(&priv->pcoHandle, 0);
-    if(0 == error)
+    if(PCO_NOERROR == error)
     {
         //PCO_ResetSettingsToDefault(priv->pcoHandle);
+        library_errors = PCO_GetGeneral (priv->pcoHandle, &priv->strGeneral);
+        CHECK_FOR_PCO_SDK_ERROR_DURING_SETUP(library_errors);
+
         library_errors = PCO_GetCameraType (priv->pcoHandle, &priv->strCamType);
         CHECK_FOR_PCO_SDK_ERROR_DURING_SETUP(library_errors);
 
+        library_errors = PCO_GetSensorStruct (priv->pcoHandle, &priv->strSensor);
+        CHECK_FOR_PCO_SDK_ERROR_DURING_SETUP(library_errors);
+
         library_errors = PCO_GetCameraDescription (priv->pcoHandle, &priv->strDescription);
+        CHECK_FOR_PCO_SDK_ERROR_DURING_SETUP(library_errors);
+
+        library_errors = PCO_GetStorageStruct (priv->pcoHandle, &priv->strStorage);
         CHECK_FOR_PCO_SDK_ERROR_DURING_SETUP(library_errors);
 
         // UcaCamera variables are filled with initial values from camera description or sensor
@@ -1340,6 +1401,39 @@ setupsdk_and_opencamera (UcaPcowinCameraPrivate *priv, UcaPcowinCamera *camera)
     return error;
 }
 
+static gint
+change_cl_transfer_parameters(UcaPcowinCameraPrivate *priv)
+{
+    gint error = PCO_NOERROR;
+
+    if(priv->strCamType.wCamType == CAMERATYPE_PCO_DIMAX_STD)
+    {
+        PCO_SC2_CL_TRANSFER_PARAM new_transfer_params, default_transfer_params;
+
+        error = PCO_GetTransferParameter(priv->pcoHandle, &default_transfer_params, sizeof(default_transfer_params));
+
+        new_transfer_params.ClockFrequency = default_transfer_params.ClockFrequency;
+        new_transfer_params.CCline = default_transfer_params.CCline;
+        new_transfer_params.Transmit = default_transfer_params.Transmit;
+
+        new_transfer_params.baudrate = 115200;
+        new_transfer_params.DataFormat = PCO_CL_DATAFORMAT_2x12;
+
+        error = PCO_SetTransferParameter(priv->pcoHandle, &new_transfer_params, sizeof(new_transfer_params));
+        if(PCO_NOERROR != error)
+        {
+            g_warning("Failed to set new transfer parameters");
+            error = PCO_SetTransferParameter(priv->pcoHandle, &default_transfer_params, sizeof(default_transfer_params));
+            if(PCO_NOERROR != error)
+            {
+                g_warning("Failed to revert back to default transfer parameters");
+                return error;
+            }
+        }
+    }
+    return error;
+}
+
 static void
 uca_pcowin_camera_init(UcaPcowinCamera *self)
 {
@@ -1360,6 +1454,21 @@ uca_pcowin_camera_init(UcaPcowinCamera *self)
     }
 
     set_default_properties(self);
+
+    /*
+    Change DIMAX CameraLink Transfer mode to DualTap 12 bit which utilizes full throughput
+    of CL Base Configuration
+    */
+    if(check_camera_type(priv->strCamType.wCamType, CAMERATYPE_PCO_DIMAX_STD))
+    {
+        error = change_cl_transfer_parameters(priv);
+        if(error)
+        {
+            g_set_error (&priv->construct_error,
+                         UCA_PCOWIN_CAMERA_ERROR, UCA_PCOWIN_CAMERA_ERROR_SDK_INIT,
+                         "Failed to set transfer parameters. Here's error code 0x%X for enquiring minds.\nSDK Error Text: %s", error, error_text);
+        }
+    }
     
     camera = UCA_CAMERA (self);
     uca_camera_register_unit (camera, "sensor-width-extended", UCA_UNIT_PIXEL);
