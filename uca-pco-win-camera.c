@@ -288,7 +288,21 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
     */
     if(check_camera_type(priv->strCamType.wCamType & 0xFF00, CAMERATYPE_PCO_EDGE))
     {
+        /*
+            There are quite a few CL transfer settings available for PCO Edge, which can be found here:
+            https://www.pco.de/fileadmin/user_upload/db/download/MA_pco.edge_CameraLink_Interface_401_01.pdf : Page 23
+
+            PCO_SetTransferParametersAuto selects appropriate parameters for transfer, compression and LUT automatically
+            based on shutter mode (rolling/global)
+        */
         library_errors = PCO_SetTransferParametersAuto(priv->pcoHandle, NULL, 0);
+        CHECK_FOR_PCO_SDK_ERROR(library_errors);
+
+        /*
+            Camera is armed again because there is a chance that PCO_SetTransferParametersAuto modified some camera settings.
+            Not arming again results in an error when Global Shutter mode is used
+        */
+        library_errors = PCO_ArmCamera(priv->pcoHandle);
         CHECK_FOR_PCO_SDK_ERROR(library_errors);
 
         library_errors = PCO_AddBufferEx(priv->pcoHandle, 0, 0, priv->buffer_number_0, priv->x_act, priv->y_act, priv->bit_per_pixel);
@@ -662,12 +676,12 @@ uca_pcowin_camera_set_property (GObject *object, guint property_id, const GValue
                     PCO_SetTimeouts (priv->pcoHandle, &timeouts[0], sizeof(timeouts));
                     /*
                     SDK Manual recommends to reboot and close camera, wait for 10 seconds before reopening again
-                    @ToDo How can this this scenario be handeled in GUI ?
-
+                    When Global Shutter is toggled in the GUI, close the application and reopen it again
+                    */
                     PCO_SetCameraSetup (priv->pcoHandle, setup_type, &setup[0], valid_setups);
                     PCO_RebootCamera(priv->pcoHandle);
                     PCO_CloseCamera(priv->pcoHandle);
-                    */
+                    
                 }
             }
             break;
