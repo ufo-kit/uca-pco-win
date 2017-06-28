@@ -7,7 +7,6 @@ find_package(PkgConfig)
 include(PkgConfigVars)
 include(ConfigurePaths)
 include(Glib2MkEnums)
-configure_paths(LIBUCA)
 
 add_definitions("-std=c99 -w")
 add_definitions(-DG_LOG_DOMAIN="UCA-PCO-WIN")
