@@ -5,7 +5,6 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
 find_package(PkgConfig)
 include(PkgConfigVars)
-include(ConfigurePaths)
 include(Glib2MkEnums)
 
 add_definitions("-std=c99 -w")
