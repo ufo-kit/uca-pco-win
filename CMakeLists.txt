@@ -16,8 +16,9 @@ pkg_check_modules(UCA libuca>=2.1.0 REQUIRED)
 pkg_check_modules(GIO gio-2.0>=2.22 REQUIRED)
 pkg_check_variable(libuca plugindir)
 
-set(PCOSDK_INCLUDE_DIR C:\pco.sdk\include)
-set(PCOSDK_LIBRARY_DIR C:\pco.sdk\bin64)
+set(PCOSDK_INCLUDE_DIR "C:\\pco.sdk\\include" CACHE PATH "Include directory of pco SDK")
+set(PCOSDK_LIBRARY_DIR "C:\\pco.sdk\\bin64" CACHE PATH "Library directory of pco SDK")
+
 set (${PCO_SDK_HEADERS} 
 	${PCOSDK_INCLUDE_DIR}/sc2_SDKStructures.h
 	${PCOSDK_INCLUDE_DIR}/sc2_defs.h
