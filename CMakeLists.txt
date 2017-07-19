@@ -7,8 +7,8 @@ find_package(PkgConfig)
 include(PkgConfigVars)
 include(Glib2MkEnums)
 
-add_definitions("-std=c99 -w")
-add_definitions(-DG_LOG_DOMAIN="UCA-PCO-WIN")
+add_definitions("-std=c99 -Wall")
+add_definitions(-DG_LOG_DOMAIN="Uca-Pco-Win")
 
 pkg_check_modules(UCA libuca>=2.1.0 REQUIRED)
 pkg_check_modules(GIO gio-2.0>=2.22 REQUIRED)
