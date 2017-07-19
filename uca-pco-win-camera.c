@@ -191,7 +191,6 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
     guint16 binned_width, binned_height;
     gboolean use_extended_sensor_format;
     gboolean transfer_async;
-    guint err;
     int library_errors;
 
     g_return_if_fail (UCA_IS_PCOWIN_CAMERA (camera));
@@ -243,7 +242,6 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
     // Diagnostics
     guint32 status, warnus, errnus;
     library_errors = PCO_GetCameraHealthStatus(priv->pcoHandle, &warnus, &errnus, &status);
-    //g_printf("0x%X \t 0x%X \t 0x%X \t",warnus,errnus,status);
 
     // Get actual armed (also locked and loaded, ready to fire the hell out) image sizes from camera. This data is used to allocate buffer
     guint16 x_act, y_act, x_max, y_max;
@@ -332,9 +330,6 @@ uca_pcowin_camera_stop_recording(UcaCamera *camera, GError **error)
 
     library_errors = PCO_SetRecordingState(priv->pcoHandle, 0x0000);
     CHECK_FOR_PCO_SDK_ERROR(library_errors);
-
-    /*guint32 status, warnus, errnus;
-    library_errors = PCO_GetCameraHealthStatus(priv->pcoHandle, &warnus, &errnus, &status);*/
 }
 
 static void
@@ -1370,7 +1365,6 @@ setupsdk_and_opencamera (UcaPcowinCameraPrivate *priv, UcaPcowinCamera *camera)
     error = PCO_OpenCamera(&priv->pcoHandle, 0);
     if(PCO_NOERROR == error)
     {
-        //PCO_ResetSettingsToDefault(priv->pcoHandle);
         library_errors = PCO_GetGeneral (priv->pcoHandle, &priv->strGeneral);
         CHECK_FOR_PCO_SDK_ERROR_DURING_SETUP(library_errors);
 
