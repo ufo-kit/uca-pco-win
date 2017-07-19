@@ -1450,10 +1450,10 @@ change_cl_transfer_parameters(UcaPcowinCameraPrivate *priv)
 }
 
 static void
-uca_pcowin_camera_init(UcaPcowinCamera *self)
+uca_pcowin_camera_init (UcaPcowinCamera *self)
 {
     UcaPcowinCameraPrivate *priv; 
-    UcaPcowinCamera *camera;
+    UcaCamera *camera;
     gint error;
     
     priv = UCA_PCOWIN_CAMERA_GET_PRIVATE(self);
