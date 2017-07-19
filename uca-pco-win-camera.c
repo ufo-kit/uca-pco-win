@@ -31,6 +31,7 @@ Notes:
 #include <sc2_SDKStructures.h>
 #include <sc2_defs.h>
 #include <SC2_SDKAddendum.h>
+#include <SC2_CamExport.h>
 #include <PCO_err.h>
 #include <PCO_errt.h>
 #include <windows.h>
