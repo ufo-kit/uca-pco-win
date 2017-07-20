@@ -46,13 +46,22 @@ Notes:
 
 #define UCA_PCOWIN_CAMERA_GET_PRIVATE(obj) (G_TYPE_INSTANCE_GET_PRIVATE((obj), UCA_TYPE_PCOWIN_CAMERA, UcaPcowinCameraPrivate))
 
-#define CHECK_FOR_PCO_SDK_ERROR(err)                                                                \
-    if (err != 0) {                                                                                 \
-        PCO_GetErrorText(err, error_text, ERROR_TEXT_BUFFER_SIZE);                                  \
-        g_set_error (error, UCA_PCOWIN_CAMERA_ERROR,                                                \
-                     UCA_PCOWIN_CAMERA_ERROR_SDKERROR,                                              \
-                     "Error occured in PCO SDK. Here's error code 0x%X for enquiring minds.\nSDK Error Text: %s",err,error_text);   \
-        return;                                                                                     \
+#define SET_ERROR_AND_RETURN_ON_SDK_ERROR(err)                          \
+    if (err != 0) {                                                     \
+        PCO_GetErrorText (err, error_text, ERROR_TEXT_BUFFER_SIZE);     \
+        g_set_error (error, UCA_PCOWIN_CAMERA_ERROR,                    \
+                     UCA_PCOWIN_CAMERA_ERROR_SDKERROR,                  \
+                     "PCO SDK error code 0x%X: %s", err, error_text);   \
+        return;                                                         \
+    }
+
+#define SET_ERROR_AND_RETURN_VAL_ON_SDK_ERROR(err, val)                 \
+    if (err != 0) {                                                     \
+        PCO_GetErrorText (err, error_text, ERROR_TEXT_BUFFER_SIZE);     \
+        g_set_error (error, UCA_PCOWIN_CAMERA_ERROR,                    \
+                     UCA_PCOWIN_CAMERA_ERROR_SDKERROR,                  \
+                     "PCO SDK error code 0x%X: %s", err, error_text);   \
+        return val;                                                     \
     }
 
 #define CHECK_FOR_PCO_SDK_ERROR_DURING_SETUP(err)   \
@@ -215,14 +224,14 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
     }
 
     library_errors = PCO_SetBinning (priv->pcoHandle, priv->horizontal_binning, priv->vertical_binning);
-    CHECK_FOR_PCO_SDK_ERROR (library_errors);
+    SET_ERROR_AND_RETURN_ON_SDK_ERROR (library_errors);
 
     guint16 roi[4] = { priv->roi_x + 1, priv->roi_y + 1, priv->roi_x + priv->roi_width, priv->roi_y + priv->roi_height };
     library_errors = PCO_SetROI (priv->pcoHandle, roi[0], roi[1], roi[2], roi[3]);
-    CHECK_FOR_PCO_SDK_ERROR (library_errors);
+    SET_ERROR_AND_RETURN_ON_SDK_ERROR (library_errors);
 
     library_errors = PCO_ArmCamera (priv->pcoHandle);
-    CHECK_FOR_PCO_SDK_ERROR (library_errors);
+    SET_ERROR_AND_RETURN_ON_SDK_ERROR (library_errors);
 
     // Diagnostics
     guint32 status, warnus, errnus;
@@ -231,7 +240,7 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
     // Get actual armed (also locked and loaded, ready to fire the hell out) image sizes from camera. This data is used to allocate buffer
     guint16 x_act, y_act, x_max, y_max;
     library_errors = PCO_GetSizes (priv->pcoHandle, &x_act, &y_act, &x_max, &y_max);
-    CHECK_FOR_PCO_SDK_ERROR (library_errors);
+    SET_ERROR_AND_RETURN_ON_SDK_ERROR (library_errors);
     priv->x_act = x_act;
     priv->y_act = y_act;
 
@@ -245,13 +254,13 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
     priv->buffer_size = x_act * y_act * 2;
 
     library_errors = PCO_AllocateBuffer (priv->pcoHandle, &priv->buffer_number_0, priv->buffer_size, &priv->buffer_pointer_0, &priv->handle_event_0);
-    CHECK_FOR_PCO_SDK_ERROR (library_errors);
+    SET_ERROR_AND_RETURN_ON_SDK_ERROR (library_errors);
 
     library_errors = PCO_AllocateBuffer (priv->pcoHandle, &priv->buffer_number_1, priv->buffer_size, &priv->buffer_pointer_1, &priv->handle_event_1);
-    CHECK_FOR_PCO_SDK_ERROR (library_errors);
+    SET_ERROR_AND_RETURN_ON_SDK_ERROR (library_errors);
 
     library_errors = PCO_CamLinkSetImageParameters (priv->pcoHandle, priv->x_act, priv->y_act);
-    CHECK_FOR_PCO_SDK_ERROR (library_errors);
+    SET_ERROR_AND_RETURN_ON_SDK_ERROR (library_errors);
 
     /*
      * Synchronous grab is the only way to read images because pco.edge does not
@@ -277,7 +286,7 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
          *  (rolling/global)
          */
         library_errors = PCO_SetTransferParametersAuto (priv->pcoHandle, NULL, 0);
-        CHECK_FOR_PCO_SDK_ERROR (library_errors);
+        SET_ERROR_AND_RETURN_ON_SDK_ERROR (library_errors);
 
         /*
          * Camera is armed again because there is a chance that
@@ -285,20 +294,20 @@ uca_pcowin_camera_start_recording(UcaCamera *camera, GError **error)
          * arming again results in an error when Global Shutter mode is used
          */
         library_errors = PCO_ArmCamera (priv->pcoHandle);
-        CHECK_FOR_PCO_SDK_ERROR (library_errors);
+        SET_ERROR_AND_RETURN_ON_SDK_ERROR (library_errors);
 
         library_errors = PCO_AddBufferEx (priv->pcoHandle, 0, 0, priv->buffer_number_0, priv->x_act, priv->y_act, priv->bit_per_pixel);
-        CHECK_FOR_PCO_SDK_ERROR (library_errors);
+        SET_ERROR_AND_RETURN_ON_SDK_ERROR (library_errors);
 
         library_errors = PCO_SetRecordingState (priv->pcoHandle, 0x0001);
-        CHECK_FOR_PCO_SDK_ERROR (library_errors);
+        SET_ERROR_AND_RETURN_ON_SDK_ERROR (library_errors);
     }
     else {
         library_errors = PCO_SetRecordingState (priv->pcoHandle, 0x0001);
-        CHECK_FOR_PCO_SDK_ERROR (library_errors);
+        SET_ERROR_AND_RETURN_ON_SDK_ERROR (library_errors);
 
         library_errors = PCO_AddBufferEx(priv->pcoHandle, 0, 0, priv->buffer_number_0, priv->x_act, priv->y_act, priv->bit_per_pixel);
-        CHECK_FOR_PCO_SDK_ERROR (library_errors);
+        SET_ERROR_AND_RETURN_ON_SDK_ERROR (library_errors);
     }
 }
 
@@ -313,10 +322,10 @@ uca_pcowin_camera_stop_recording(UcaCamera *camera, GError **error)
     priv = UCA_PCOWIN_CAMERA_GET_PRIVATE (camera);
 
     library_errors = PCO_CancelImages (priv->pcoHandle);
-    CHECK_FOR_PCO_SDK_ERROR (library_errors);
+    SET_ERROR_AND_RETURN_ON_SDK_ERROR (library_errors);
 
     library_errors = PCO_SetRecordingState (priv->pcoHandle, 0x0000);
-    CHECK_FOR_PCO_SDK_ERROR (library_errors);
+    SET_ERROR_AND_RETURN_ON_SDK_ERROR (library_errors);
 }
 
 static void
@@ -352,7 +361,7 @@ uca_pcowin_camera_trigger (UcaCamera *camera, GError **error)
      * calling forcetrigger is prevented if camera is busy
      */
     library_errors = PCO_GetCameraBusyStatus (priv->pcoHandle, &is_camera_busy);
-    CHECK_FOR_PCO_SDK_ERROR (library_errors);
+    SET_ERROR_AND_RETURN_ON_SDK_ERROR (library_errors);
 
     if (is_camera_busy) {
         g_set_error (error, UCA_PCOWIN_CAMERA_ERROR, UCA_PCOWIN_CAMERA_ERROR_GENERAL,
@@ -360,7 +369,7 @@ uca_pcowin_camera_trigger (UcaCamera *camera, GError **error)
     }
     else {
         library_errors = PCO_ForceTrigger(priv->pcoHandle, &trigger_state);
-        CHECK_FOR_PCO_SDK_ERROR (library_errors);
+        SET_ERROR_AND_RETURN_ON_SDK_ERROR (library_errors);
     }
 }
 
@@ -373,7 +382,7 @@ uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
     guint32 image_index_to_transfer = 0;
     int result_event;
 
-    g_return_if_fail (UCA_IS_PCOWIN_CAMERA (camera));
+    g_return_val_if_fail (UCA_IS_PCOWIN_CAMERA (camera), FALSE);
 
     priv = UCA_PCOWIN_CAMERA_GET_PRIVATE (camera);
 
@@ -410,7 +419,7 @@ uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
         priv->current_image++;
 
         library_errors = PCO_GetImageEx (priv->pcoHandle, priv->active_ram_segment, image_index_to_transfer, image_index_to_transfer, priv->buffer_number_0, priv->x_act, priv->y_act, priv->bit_per_pixel);
-        CHECK_FOR_PCO_SDK_ERROR (library_errors);
+        SET_ERROR_AND_RETURN_VAL_ON_SDK_ERROR (library_errors, FALSE);
         memcpy((gchar *) data, (gchar *) priv->buffer_pointer_0, priv->buffer_size);
     }
     else {
@@ -425,7 +434,7 @@ uca_pcowin_camera_grab (UcaCamera *camera, gpointer data, GError **error)
             memcpy ((gchar *) data, (gchar *) priv->buffer_pointer_0, priv->buffer_size);
 
             library_errors = PCO_AddBufferEx (priv->pcoHandle, 0, 0, priv->buffer_number_0, priv->x_act, priv->y_act, priv->bit_per_pixel);
-            CHECK_FOR_PCO_SDK_ERROR (library_errors);
+            SET_ERROR_AND_RETURN_VAL_ON_SDK_ERROR (library_errors, FALSE);
         }
         else {
             g_warning ("WaitForSingleObject Failed. Return Value = %X",result_event);
@@ -441,12 +450,12 @@ uca_pcowin_camera_readout (UcaCamera *camera, gpointer data, guint index, GError
     UcaPcowinCameraPrivate *priv;
     int library_errors;
 
-    g_return_if_fail (UCA_IS_PCOWIN_CAMERA(camera));
+    g_return_val_if_fail (UCA_IS_PCOWIN_CAMERA (camera), FALSE);
 
     priv = UCA_PCOWIN_CAMERA_GET_PRIVATE (camera);
 
     library_errors = PCO_GetImageEx (priv->pcoHandle, priv->active_ram_segment, index, index, priv->buffer_number_0, priv->x_act, priv->y_act, priv->bit_per_pixel);
-    CHECK_FOR_PCO_SDK_ERROR (library_errors);
+    SET_ERROR_AND_RETURN_VAL_ON_SDK_ERROR (library_errors, FALSE);
 
     memcpy ((gchar *) data, (gchar *) priv->buffer_pointer_0, priv->buffer_size);
 
