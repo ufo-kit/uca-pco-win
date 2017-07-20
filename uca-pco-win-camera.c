@@ -1087,7 +1087,6 @@ static gboolean
 uca_pcowin_camera_initable_init (GInitable *initable, GCancellable *cancellable, GError **error)
 {
     UcaPcowinCameraPrivate *priv;
-    gdouble step_size;
 
     g_return_val_if_fail (UCA_IS_PCOWIN_CAMERA (initable), FALSE);
 
